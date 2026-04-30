@@ -154,6 +154,44 @@ Base URL: `/api/v1`
 }
 ```
 
+### POST `/admin/slots/bulk`
+- Auth: admin only.
+- Purpose: tao slot theo khoang ngay idempotent cho 1 field.
+- Request:
+```json
+{
+  "fieldId": "field-uuid",
+  "fromDate": "2026-05-01",
+  "toDate": "2026-05-07",
+  "slotMinutes": 90,
+  "dailyStart": "18:00",
+  "dailyEnd": "22:30"
+}
+```
+- Response 200:
+```json
+{
+  "fieldId": "field-uuid",
+  "fromDate": "2026-05-01",
+  "toDate": "2026-05-07",
+  "createdCount": 20,
+  "skippedCount": 4
+}
+```
+
+### GET `/admin/dashboard`
+- Auth: admin only.
+- Purpose: dashboard toi thieu cho van hanh.
+- Response 200:
+```json
+{
+  "date": "2026-05-01",
+  "bookingsToday": 8,
+  "totalSlotsToday": 20,
+  "slotUtilization": 0.4
+}
+```
+
 ## Chatbot
 
 ### POST `/chatbot/query`
@@ -168,13 +206,13 @@ Base URL: `/api/v1`
 - Response 200:
 ```json
 {
-  "reply": "Toi mai con 2 slot san 7 nguoi luc 19:00 va 20:30.",
-  "source": "db+llm",
-  "suggestions": [
-    "Ban muon dat slot 19:00 khong?"
-  ]
+  "reply": "Stub: Da nhan cau hoi. Chatbot retrieval-first se duoc noi o Day 9.",
+  "source": "stub"
 }
 ```
+- Note:
+  - Day 4 tra ve stub de frontend test UI chat som.
+  - Day 9 se nang cap thanh `db+llm` + `fallback`.
 - Response 200 (fallback):
 ```json
 {
