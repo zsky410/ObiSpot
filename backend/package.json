@@ -7,7 +7,8 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "check": "node --check src/server.js",
-    "smoke:test": "./scripts/smoke-test.sh"
+    "smoke:test": "./scripts/smoke-test.sh",
+    "concurrency:test": "node scripts/concurrency-test.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.55.0",
