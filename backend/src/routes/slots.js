@@ -1,16 +1,31 @@
 import { Router } from "express";
+import { z } from "zod";
 import { supabaseAdminClient } from "../lib/supabase.js";
+import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
+import { hasValidationError, uuidLikeSchema, validateQuery } from "../utils/validate.js";
 
 export const slotsRouter = Router();
 
+const slotsQuerySchema = z.object({
+  date: z.iso.date(),
+  venueId: uuidLikeSchema
+});
+
 slotsRouter.get(
   "/",
+  validateQuery(slotsQuerySchema),
   asyncHandler(async (req, res) => {
-    const { date, venueId } = req.query;
-    if (!date || !venueId) {
-      return sendError(res, 400, "VALIDATION_ERROR", "date and venueId are required");
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid slots query params",
+        { fields: req.validationError }
+      );
     }
+    const { date, venueId } = req.validatedQuery;
 
     const start = new Date(`${date}T00:00:00+07:00`).toISOString();
     const end = new Date(`${date}T23:59:59+07:00`).toISOString();
@@ -26,7 +41,7 @@ slotsRouter.get(
       .order("start_time", { ascending: true });
 
     if (error) {
-      return sendError(res, 500, "DB_ERROR", "Failed to fetch slots");
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch slots");
     }
 
     const items = (data || []).map((slot) => ({

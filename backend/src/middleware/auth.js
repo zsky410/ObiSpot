@@ -1,4 +1,5 @@
 import { supabaseAdminClient } from "../lib/supabase.js";
+import { ERROR_CODES } from "../utils/errorCodes.js";
 import { sendError } from "../utils/http.js";
 
 function getBearerToken(req) {
@@ -12,12 +13,12 @@ function getBearerToken(req) {
 export async function requireAuth(req, res, next) {
   const token = getBearerToken(req);
   if (!token) {
-    return sendError(res, 401, "UNAUTHORIZED", "Missing bearer token");
+    return sendError(res, 401, ERROR_CODES.unauthorized, "Missing bearer token");
   }
 
   const { data: authData, error: authError } = await supabaseAdminClient.auth.getUser(token);
   if (authError || !authData.user) {
-    return sendError(res, 401, "UNAUTHORIZED", "Invalid or expired token");
+    return sendError(res, 401, ERROR_CODES.unauthorized, "Invalid or expired token");
   }
 
   const { data: profile, error: profileError } = await supabaseAdminClient
@@ -27,7 +28,12 @@ export async function requireAuth(req, res, next) {
     .maybeSingle();
 
   if (profileError || !profile) {
-    return sendError(res, 403, "PROFILE_NOT_FOUND", "Profile not found for authenticated user");
+    return sendError(
+      res,
+      403,
+      ERROR_CODES.profileNotFound,
+      "Profile not found for authenticated user"
+    );
   }
 
   req.auth = {
@@ -43,10 +49,10 @@ export async function requireAuth(req, res, next) {
 
 export function requireAdmin(req, res, next) {
   if (!req.auth?.user) {
-    return sendError(res, 401, "UNAUTHORIZED", "Authentication is required");
+    return sendError(res, 401, ERROR_CODES.unauthorized, "Authentication is required");
   }
   if (req.auth.user.role !== "admin") {
-    return sendError(res, 403, "FORBIDDEN", "Admin role is required");
+    return sendError(res, 403, ERROR_CODES.forbidden, "Admin role is required");
   }
   return next();
 }

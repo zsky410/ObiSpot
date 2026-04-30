@@ -1,18 +1,33 @@
 import { Router } from "express";
+import { z } from "zod";
 import { supabaseAdminClient } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
+import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
+import { hasValidationError, uuidLikeSchema, validateBody } from "../utils/validate.js";
 
 export const bookingsRouter = Router();
+
+const createBookingBodySchema = z.object({
+  slotId: uuidLikeSchema,
+  note: z.string().trim().max(300).optional()
+});
 
 bookingsRouter.post(
   "/",
   requireAuth,
+  validateBody(createBookingBodySchema),
   asyncHandler(async (req, res) => {
-    const { slotId, note } = req.body || {};
-    if (!slotId) {
-      return sendError(res, 400, "VALIDATION_ERROR", "slotId is required");
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid create booking body",
+        { fields: req.validationError }
+      );
     }
+    const { slotId, note } = req.validatedBody;
 
     const { data, error } = await supabaseAdminClient
       .from("bookings")
@@ -27,9 +42,15 @@ bookingsRouter.post(
 
     if (error) {
       if (error.code === "23505") {
-        return sendError(res, 409, "BOOKING_CONFLICT", "Slot is no longer available", { slotId });
+        return sendError(
+          res,
+          409,
+          ERROR_CODES.bookingConflict,
+          "Slot is no longer available",
+          { slotId }
+        );
       }
-      return sendError(res, 500, "DB_ERROR", "Failed to create booking");
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to create booking");
     }
 
     return res.status(201).json({
@@ -53,7 +74,7 @@ bookingsRouter.get(
       .order("created_at", { ascending: false });
 
     if (error) {
-      return sendError(res, 500, "DB_ERROR", "Failed to fetch user bookings");
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch user bookings");
     }
 
     const items = (data || []).map((booking) => ({
