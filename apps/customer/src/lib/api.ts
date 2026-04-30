@@ -8,6 +8,17 @@ export type ApiError = {
   };
 };
 
+export class ApiRequestError extends Error {
+  code?: string;
+  details?: unknown;
+
+  constructor(message: string, code?: string, details?: unknown) {
+    super(message);
+    this.code = code;
+    this.details = details;
+  }
+}
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH";
   token?: string | null;
@@ -32,7 +43,7 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const json = (await response.json().catch(() => ({}))) as T & ApiError;
   if (!response.ok) {
     const message = json?.error?.message || "Request failed";
-    throw new Error(message);
+    throw new ApiRequestError(message, json?.error?.code, json?.error?.details);
   }
 
   return json;
@@ -45,5 +56,62 @@ export async function loginApi(email: string, password: string) {
   }>("/auth/login", {
     method: "POST",
     body: { email, password }
+  });
+}
+
+export type Venue = {
+  id: string;
+  name: string;
+  address: string;
+};
+
+export type Slot = {
+  id: string;
+  fieldId: string;
+  fieldName: string;
+  startTime: string;
+  endTime: string;
+  status: "available" | "blocked";
+  pricePerSlot: number;
+};
+
+export type MyBooking = {
+  id: string;
+  status: "pending" | "confirmed" | "cancelled";
+  slot: {
+    id: string | null;
+    startTime: string | null;
+    fieldName: string;
+  };
+};
+
+export async function getVenuesApi() {
+  return apiRequest<{ items: Venue[] }>("/venues");
+}
+
+export async function getSlotsApi(date: string, venueId: string) {
+  return apiRequest<{ date: string; items: Slot[] }>(`/slots?date=${date}&venueId=${venueId}`);
+}
+
+export async function createBookingApi(token: string, slotId: string, note?: string) {
+  return apiRequest<{
+    id: string;
+    status: "pending" | "confirmed" | "cancelled";
+    slotId: string;
+    userId: string;
+    createdAt: string;
+  }>("/bookings", {
+    method: "POST",
+    token,
+    body: {
+      slotId,
+      note: note || null
+    }
+  });
+}
+
+export async function getMyBookingsApi(token: string) {
+  return apiRequest<{ items: MyBooking[] }>("/bookings/me", {
+    token
   });
 }
