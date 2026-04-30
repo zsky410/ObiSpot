@@ -2,10 +2,11 @@ import { router, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
 
 export default function VenueDetailScreen() {
+  const insets = useSafeAreaInsets();
   const params = useLocalSearchParams<{
     venueId?: string;
     venueName?: string;
@@ -16,14 +17,10 @@ export default function VenueDetailScreen() {
   const venueName = params.venueName || "Hệ thống sân";
   const venueAddress = params.venueAddress || "Địa chỉ cập nhật sau";
   const [selectedPitchType, setSelectedPitchType] = useState<"5" | "7">("5");
-  const pitchOptions =
-    selectedPitchType === "5"
-      ? ["Sân A1\nĐang trống", "Sân A2\nĐang trống", "Sân A3\nĐang trống", "Sân A4\nSắp đặt"]
-      : ["Sân B1\nĐang trống", "Sân B2\nĐang trống", "Sân B3\nĐã đặt", "Sân B4\nĐang trống"];
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <ScrollView contentContainerStyle={[styles.container, { paddingBottom: 110 + insets.bottom }]}>
         <View style={styles.heroWrap}>
           <ImagePlaceholder
             height={220}
@@ -81,15 +78,10 @@ export default function VenueDetailScreen() {
               <Text style={[styles.typeText, selectedPitchType === "7" && styles.typeTextActive]}>Sân 7 người</Text>
             </Pressable>
           </View>
-          <View style={styles.fieldGrid}>
-            {pitchOptions.map((item) => (
-              <View key={item} style={styles.fieldItem}>
-                <Text style={styles.fieldText}>{item}</Text>
-              </View>
-            ))}
-          </View>
         </View>
 
+      </ScrollView>
+      <View style={[styles.bottomCtaWrap, { paddingBottom: Math.max(insets.bottom, 10) }]}>
         <Pressable
           style={styles.primaryButton}
           onPress={() =>
@@ -101,14 +93,14 @@ export default function VenueDetailScreen() {
         >
           <Text style={styles.primaryButtonText}>ĐẶT SÂN NGAY</Text>
         </Pressable>
-      </ScrollView>
+      </View>
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#0B1724" },
-  container: { paddingTop: 0, paddingBottom: 14, gap: 0, backgroundColor: "#F2F5FA" },
+  safe: { flex: 1, backgroundColor: "#F2F5FA" },
+  container: { paddingTop: 0, gap: 0, backgroundColor: "#F2F5FA" },
   backButton: {
     width: 36,
     height: 36,
@@ -166,18 +158,15 @@ const styles = StyleSheet.create({
   typePillActive: { backgroundColor: "#087B57", borderColor: "#087B57" },
   typeText: { color: "#1D2E45", fontWeight: "700" },
   typeTextActive: { color: "#fff" },
-  fieldGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  fieldItem: {
-    width: "48%",
-    borderWidth: 1,
-    borderColor: "#DFE7F2",
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center"
+  bottomCtaWrap: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingTop: 10,
+    backgroundColor: "#F2F5FA"
   },
-  fieldText: { textAlign: "center", color: "#1F3148", fontWeight: "700" },
   primaryButton: {
-    marginTop: 12,
     marginHorizontal: 14,
     backgroundColor: "#087B57",
     borderRadius: 12,
