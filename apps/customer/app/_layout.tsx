@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { Exo2_800ExtraBold, useFonts } from "@expo-google-fonts/exo-2";
 import { Stack, usePathname, useRouter } from "expo-router";
 import { useEffect, useMemo } from "react";
 import { AuthProvider, useAuth } from "../src/store/auth";
@@ -30,6 +31,13 @@ function RootNavigator() {
 
 export default function RootLayout() {
   const queryClient = useMemo(() => new QueryClient(), []);
+  const [fontsLoaded] = useFonts({
+    Exo2_800ExtraBold
+  });
+
+  if (!fontsLoaded) {
+    return null;
+  }
 
   return (
     <QueryClientProvider client={queryClient}>

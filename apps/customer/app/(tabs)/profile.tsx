@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
 import { useAuth } from "../../src/store/auth";
 
 export default function ProfileScreen() {
@@ -18,6 +20,10 @@ export default function ProfileScreen() {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.container}>
+        <View style={styles.headerRow}>
+          <TabHeaderLogo />
+          <Ionicons name="settings-outline" size={22} color="#6C7A71" />
+        </View>
         <Text style={styles.title}>Tai khoan</Text>
         <View style={styles.card}>
           <Text style={styles.label}>Ho ten</Text>
@@ -40,6 +46,7 @@ export default function ProfileScreen() {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#F8F9FF" },
   container: { flex: 1, padding: 20, gap: 12 },
+  headerRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   title: { fontSize: 28, fontWeight: "700", color: "#0B1C30" },
   card: {
     borderRadius: 16,

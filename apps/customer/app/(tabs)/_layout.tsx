@@ -1,4 +1,5 @@
 import { Tabs } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
 
 export default function TabsLayout() {
   return (
@@ -6,13 +7,38 @@ export default function TabsLayout() {
       screenOptions={{
         headerShown: false,
         tabBarActiveTintColor: "#006C49",
-        tabBarInactiveTintColor: "#6C7A71"
+        tabBarInactiveTintColor: "#6C7A71",
+        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" }
       }}
     >
-      <Tabs.Screen name="home" options={{ title: "Home" }} />
-      <Tabs.Screen name="my-bookings" options={{ title: "Don cua toi" }} />
-      <Tabs.Screen name="chat" options={{ title: "AI" }} />
-      <Tabs.Screen name="profile" options={{ title: "Tai khoan" }} />
+      <Tabs.Screen
+        name="home"
+        options={{
+          title: "Trang chủ",
+          tabBarIcon: ({ color, size }) => <Ionicons name="home" color={color} size={size} />
+        }}
+      />
+      <Tabs.Screen
+        name="my-bookings"
+        options={{
+          title: "Lịch đặt",
+          tabBarIcon: ({ color, size }) => <Ionicons name="calendar-outline" color={color} size={size} />
+        }}
+      />
+      <Tabs.Screen
+        name="chat"
+        options={{
+          title: "Tin nhắn",
+          tabBarIcon: ({ color, size }) => <Ionicons name="chatbox-ellipses-outline" color={color} size={size} />
+        }}
+      />
+      <Tabs.Screen
+        name="profile"
+        options={{
+          title: "Cá nhân",
+          tabBarIcon: ({ color, size }) => <Ionicons name="person-outline" color={color} size={size} />
+        }}
+      />
     </Tabs>
   );
 }
