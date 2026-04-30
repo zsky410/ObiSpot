@@ -4,6 +4,7 @@ import { venuesRouter } from "./routes/venues.js";
 import { slotsRouter } from "./routes/slots.js";
 import { bookingsRouter } from "./routes/bookings.js";
 import { adminRouter } from "./routes/admin.js";
+import { chatbotRouter } from "./routes/chatbot.js";
 import { requestLogger } from "./middleware/logger.js";
 import { supabaseAdminClient } from "./lib/supabase.js";
 import { ERROR_CODES } from "./utils/errorCodes.js";
@@ -30,6 +31,7 @@ app.use("/api/v1/venues", venuesRouter);
 app.use("/api/v1/slots", slotsRouter);
 app.use("/api/v1/bookings", bookingsRouter);
 app.use("/api/v1/admin", adminRouter);
+app.use("/api/v1/chatbot", chatbotRouter);
 
 app.use((_req, res) => {
   return sendError(res, 404, ERROR_CODES.notFound, "Route not found");

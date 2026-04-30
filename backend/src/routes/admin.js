@@ -32,6 +32,31 @@ const slotParamsSchema = z.object({
 const updateSlotBodySchema = z.object({
   status: z.enum(["available", "blocked"])
 });
+const bulkSlotsBodySchema = z.object({
+  fieldId: uuidLikeSchema,
+  fromDate: z.iso.date(),
+  toDate: z.iso.date(),
+  slotMinutes: z.int().min(30).max(180),
+  dailyStart: z.string().regex(/^\d{2}:\d{2}$/),
+  dailyEnd: z.string().regex(/^\d{2}:\d{2}$/)
+});
+
+function parseMinutesFromHm(hm) {
+  const [hours, minutes] = hm.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function formatHmFromMinutes(totalMinutes) {
+  const hours = Math.floor(totalMinutes / 60)
+    .toString()
+    .padStart(2, "0");
+  const minutes = (totalMinutes % 60).toString().padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+function localTimestamp(date, hm) {
+  return `${date}T${hm}:00+07:00`;
+}
 
 adminRouter.get(
   "/bookings",
@@ -136,6 +161,153 @@ adminRouter.patch(
       slotId: data.slot_id,
       userId: data.user_id,
       createdAt: data.created_at
+    });
+  })
+);
+
+adminRouter.post(
+  "/slots/bulk",
+  validateBody(bulkSlotsBodySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(res, 400, ERROR_CODES.validationError, "Invalid bulk slots request", {
+        fields: req.validationError
+      });
+    }
+
+    const { fieldId, fromDate, toDate, slotMinutes, dailyStart, dailyEnd } = req.validatedBody;
+    const startMinutes = parseMinutesFromHm(dailyStart);
+    const endMinutes = parseMinutesFromHm(dailyEnd);
+
+    if (startMinutes >= endMinutes) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "dailyStart must be earlier than dailyEnd"
+      );
+    }
+    if (slotMinutes > endMinutes - startMinutes) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "slotMinutes is larger than the daily window"
+      );
+    }
+
+    const rangeStart = localTimestamp(fromDate, "00:00");
+    const rangeEnd = localTimestamp(toDate, "23:59");
+    const { data: existing, error: existingError } = await supabaseAdminClient
+      .from("time_slots")
+      .select("id, start_time, end_time")
+      .eq("field_id", fieldId)
+      .gte("start_time", rangeStart)
+      .lte("start_time", rangeEnd);
+
+    if (existingError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to read existing slots");
+    }
+
+    const existingKeys = new Set(
+      (existing || []).map((slot) => `${slot.start_time}|${slot.end_time}`)
+    );
+    const rowsToInsert = [];
+    let cursorDate = new Date(`${fromDate}T00:00:00Z`);
+    const endDate = new Date(`${toDate}T00:00:00Z`);
+    let skippedCount = 0;
+
+    while (cursorDate <= endDate) {
+      const dateStr = cursorDate.toISOString().slice(0, 10);
+      for (
+        let start = startMinutes;
+        start + slotMinutes <= endMinutes;
+        start += slotMinutes
+      ) {
+        const end = start + slotMinutes;
+        const startHm = formatHmFromMinutes(start);
+        const endHm = formatHmFromMinutes(end);
+        const startTs = localTimestamp(dateStr, startHm);
+        const endTs = localTimestamp(dateStr, endHm);
+        const key = `${new Date(startTs).toISOString()}|${new Date(endTs).toISOString()}`;
+
+        if (existingKeys.has(key)) {
+          skippedCount += 1;
+          continue;
+        }
+        existingKeys.add(key);
+        rowsToInsert.push({
+          field_id: fieldId,
+          start_time: startTs,
+          end_time: endTs,
+          status: "available"
+        });
+      }
+      cursorDate.setUTCDate(cursorDate.getUTCDate() + 1);
+    }
+
+    if (rowsToInsert.length > 0) {
+      const { error: insertError } = await supabaseAdminClient.from("time_slots").insert(rowsToInsert);
+      if (insertError) {
+        return sendError(res, 500, ERROR_CODES.dbError, "Failed to create slots in bulk");
+      }
+    }
+
+    return res.status(200).json({
+      fieldId,
+      fromDate,
+      toDate,
+      createdCount: rowsToInsert.length,
+      skippedCount
+    });
+  })
+);
+
+adminRouter.get(
+  "/dashboard",
+  asyncHandler(async (_req, res) => {
+    const now = new Date();
+    const todayDate = now.toISOString().slice(0, 10);
+    const start = `${todayDate}T00:00:00+07:00`;
+    const end = `${todayDate}T23:59:59+07:00`;
+
+    const { data: slotsData, error: slotsError } = await supabaseAdminClient
+      .from("time_slots")
+      .select("id")
+      .gte("start_time", start)
+      .lte("start_time", end);
+
+    if (slotsError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch dashboard slots");
+    }
+
+    const { data: activeBookings, error: bookingError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, slot_id, time_slots:slot_id(start_time)")
+      .in("status", ["pending", "confirmed"]);
+
+    if (bookingError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch dashboard bookings");
+    }
+
+    const activeToday = (activeBookings || []).filter((item) => {
+      const slotStartTime = item.time_slots?.start_time;
+      if (!slotStartTime) {
+        return false;
+      }
+      const slotDate = new Date(slotStartTime).toISOString().slice(0, 10);
+      return slotDate === todayDate;
+    });
+
+    const totalSlotsToday = (slotsData || []).length;
+    const bookingsToday = activeToday.length;
+    const slotUtilization = totalSlotsToday === 0 ? 0 : Number((bookingsToday / totalSlotsToday).toFixed(2));
+
+    return res.status(200).json({
+      date: todayDate,
+      bookingsToday,
+      totalSlotsToday,
+      slotUtilization
     });
   })
 );
