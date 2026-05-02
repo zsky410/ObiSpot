@@ -5,22 +5,32 @@ import { useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
-import { ApiRequestError, createBookingApi, getSlotsApi } from "../src/lib/api";
+import { ApiRequestError, createBookingApi, getSlotsApi, type Slot } from "../src/lib/api";
 import { useAuth } from "../src/store/auth";
+
+type BoundarySelection = {
+  fieldName: string;
+  startLabel: string;
+  endLabel: string;
+};
 
 export default function ScheduleBookingScreen() {
   const { token } = useAuth();
   const queryClient = useQueryClient();
   const params = useLocalSearchParams<{ venueId?: string; venueName?: string; venueAddress?: string }>();
   const venueId = params.venueId || "";
-  const [selectedDate, setSelectedDate] = useState(getDateOffset(0));
-  const [selectedSlotId, setSelectedSlotId] = useState("");
-  const [selectedCellKey, setSelectedCellKey] = useState("");
+  const [selectedDate, setSelectedDate] = useState(() => getDateOffsetVietnam(0));
+  /** Timeline dùng theo mốc thời gian: chọn mốc bắt đầu và mốc kết thúc, slot thật nằm ở giữa hai mốc. */
+  const [selection, setSelection] = useState<BoundarySelection | null>(null);
+
+  function clearRangeSelection() {
+    setSelection(null);
+  }
 
   const dateOptions = useMemo(
     () =>
       Array.from({ length: 5 }).map((_, i) => {
-        const d = getDateOffset(i);
+        const d = getDateOffsetVietnam(i);
         return { value: d, label: d.slice(8, 10) };
       }),
     []
@@ -33,13 +43,14 @@ export default function ScheduleBookingScreen() {
   });
 
   const createMutation = useMutation({
-    mutationFn: (slotId: string) => {
+    mutationFn: async (payload: { ids: string[]; totalPriceVnd: number }) => {
       if (!token) {
         throw new Error("Thiếu token đăng nhập");
       }
-      return createBookingApi(token, slotId, "Đặt từ màn đặt lịch trực quan");
+      const data = await createBookingApi(token, payload.ids, "Đặt từ màn đặt lịch trực quan");
+      return { data, totalPriceVnd: payload.totalPriceVnd, slotCount: payload.ids.length };
     },
-    onSuccess: (data) => {
+    onSuccess: ({ data, totalPriceVnd, slotCount }) => {
       queryClient.invalidateQueries({ queryKey: ["slots"] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
       router.replace({
@@ -48,7 +59,8 @@ export default function ScheduleBookingScreen() {
           bookingId: data.id,
           venueName: params.venueName || "Sân",
           selectedDate,
-          slotId: data.slotId
+          totalPrice: String(totalPriceVnd),
+          slotCount: String(slotCount)
         }
       });
     },
@@ -61,29 +73,63 @@ export default function ScheduleBookingScreen() {
     }
   });
 
-  const selectedSlot = (slotsQuery.data?.items || []).find((item) => item.id === selectedSlotId);
+  const slotItems = slotsQuery.data?.items ?? [];
   const timelineTimes = useMemo(() => buildTimelineLabels(), []);
 
+  const selectedSorted = useMemo(
+    () => slotsFromBoundarySelection(slotItems, selection, selectedDate),
+    [slotItems, selection, selectedDate]
+  );
+
+  const firstSel = selectedSorted[0];
+  const lastSel = selectedSorted[selectedSorted.length - 1];
+
   const fieldRows = useMemo(() => {
-    const uniq = Array.from(new Set((slotsQuery.data?.items || []).map((slot) => slot.fieldName))).filter(Boolean);
+    const uniq = Array.from(new Set(slotItems.map((slot) => slot.fieldName))).filter(Boolean);
     if (uniq.length > 0) {
       return uniq;
     }
     return ["Sân A1", "Sân A2", "Sân A3", "Sân A4"];
-  }, [slotsQuery.data?.items]);
+  }, [slotItems]);
 
-  const slotMap = useMemo(() => {
-    const map = new Map<string, NonNullable<typeof selectedSlot>>();
-    for (const slot of slotsQuery.data?.items || []) {
-      const startLabel = toTimeLabel(slot.startTime);
-      map.set(`${slot.fieldName}__${startLabel}`, slot);
+  const boundaryMap = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    for (const slot of slotItems) {
+      for (const label of [slotGridRowKey(slot.startTime, selectedDate), slotGridRowKey(slot.endTime, selectedDate)]) {
+        if (!label) {
+          continue;
+        }
+        const set = map.get(slot.fieldName) ?? new Set<string>();
+        set.add(label);
+        map.set(slot.fieldName, set);
+      }
     }
     return map;
-  }, [slotsQuery.data?.items]);
+  }, [slotItems, selectedDate]);
 
-  const totalMinutes = selectedSlot
-    ? Math.max(0, (new Date(selectedSlot.endTime).getTime() - new Date(selectedSlot.startTime).getTime()) / 60000)
-    : 0;
+  const activeBoundaryKeys = useMemo(() => {
+    const keys = new Set<string>();
+    if (!selection) {
+      return keys;
+    }
+
+    const startIdx = timelineTimes.indexOf(selection.startLabel);
+    const endIdx = timelineTimes.indexOf(selection.endLabel);
+    if (startIdx === -1 || endIdx === -1) {
+      return keys;
+    }
+
+    const from = Math.min(startIdx, endIdx);
+    const to = Math.max(startIdx, endIdx);
+    for (let i = from; i <= to; i++) {
+      keys.add(`${selection.fieldName}__${timelineTimes[i]}`);
+    }
+    return keys;
+  }, [selection, timelineTimes]);
+
+  const totalMinutes = selectedSorted.reduce((acc, s) => acc + slotDurationMinutes(s), 0);
+  /** Luôn bám giá backend trả về cho từng slot để khớp rule và dữ liệu booking thật. */
+  const totalPriceVnd = selectedSorted.reduce((acc, s) => acc + slotPriceVnd(s), 0);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -107,8 +153,7 @@ export default function ScheduleBookingScreen() {
                 style={[styles.dateCell, active && styles.dateCellActive]}
                 onPress={() => {
                   setSelectedDate(item.value);
-                  setSelectedSlotId("");
-                  setSelectedCellKey("");
+                  clearRangeSelection();
                 }}
               >
                 <Text style={[styles.dateCellWeek, active && styles.dateCellTextActive]}>T{weekdayFromDate(item.value)}</Text>
@@ -118,11 +163,46 @@ export default function ScheduleBookingScreen() {
           })}
         </View>
 
-        <View style={styles.legendRow}>
-          <LegendDot color="#D9DFE7" label="Không có slot" />
-          <LegendDot color="#E8FCF3" label="Có thể chọn" />
-          <LegendDot color="#42B883" label="Đã chọn" />
+        <View style={styles.legendBar}>
+          <View style={styles.legendRow}>
+            <LegendDot color="#D9DFE7" label="Không có slot" />
+            <LegendDot color="#E8FCF3" label="Có thể chọn" />
+            <LegendDot color="#42B883" label="Đã chọn" />
+          </View>
+          {selection ? (
+            <Pressable style={styles.clearSelectionBtn} hitSlop={10} onPress={clearRangeSelection}>
+              <Text style={styles.clearSelectionText}>Bỏ chọn</Text>
+            </Pressable>
+          ) : null}
         </View>
+        {!venueId ? (
+          <Text style={styles.slotsEmptyHint}>Thiếu mã chi nhánh — quay lại chọn chi nhánh rồi mở đặt lịch.</Text>
+        ) : null}
+
+        {slotsQuery.isError ? (
+          <View style={styles.slotsErrorBox}>
+            <Text style={styles.slotsErrorTitle}>Không tải được lịch slot</Text>
+            <Text style={styles.slotsErrorText}>
+              {slotsQuery.error instanceof ApiRequestError
+                ? slotsQuery.error.message
+                : slotsQuery.error instanceof Error
+                  ? slotsQuery.error.message
+                  : "Lỗi mạng hoặc máy chủ."}
+            </Text>
+            <Text style={styles.slotsErrorHint}>
+              Kiểm tra backend đang chạy và đã restart sau khi sửa API. Điện thoại và máy dev cùng mạng.
+            </Text>
+            <Pressable style={styles.retryBtnSmall} onPress={() => slotsQuery.refetch()}>
+              <Text style={styles.retryBtnSmallText}>Thử lại</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
+        {slotsQuery.isSuccess && venueId && (slotsQuery.data?.items?.length ?? 0) === 0 ? (
+          <Text style={styles.slotsEmptyHint}>
+            Không có slot trống cho ngày này (seed chỉ có ~14 ngày kể từ lúc chạy SQL — thử đổi ngày trong tuần đầu).
+          </Text>
+        ) : null}
 
         <View style={styles.tableOuter}>
           <ScrollView horizontal showsHorizontalScrollIndicator={true}>
@@ -143,12 +223,10 @@ export default function ScheduleBookingScreen() {
                     <View style={styles.tableTimeLabelCell}>
                       <Text style={styles.tableTimeLabelText}>{time}</Text>
                     </View>
-                    {fieldRows.map((fieldName, fieldIdx) => {
-                      const matchedSlot = slotMap.get(`${fieldName}__${time}`);
+                    {fieldRows.map((fieldName) => {
                       const cellKey = `${fieldName}__${time}`;
-                      const demoAvailable = !matchedSlot && isDemoAvailable(time, fieldIdx);
-                      const active = matchedSlot?.id === selectedSlotId || (!matchedSlot && selectedCellKey === cellKey);
-                      const isAvailable = !!matchedSlot || demoAvailable;
+                      const active = activeBoundaryKeys.has(cellKey);
+                      const isAvailable = boundaryMap.get(fieldName)?.has(time) ?? false;
                       return (
                         <Pressable
                           key={`${fieldName}-${time}`}
@@ -158,14 +236,10 @@ export default function ScheduleBookingScreen() {
                             active && styles.tableSlotCellActive
                           ]}
                           onPress={() => {
-                            if (matchedSlot) {
-                              setSelectedSlotId(matchedSlot.id);
-                              setSelectedCellKey(cellKey);
-                              return;
-                            }
-                            if (demoAvailable) {
-                              setSelectedSlotId("");
-                              setSelectedCellKey(cellKey);
+                            if (isAvailable) {
+                              setSelection((prev) =>
+                                applyBoundaryTap(slotItems, prev, fieldName, time, selectedDate, timelineTimes)
+                              );
                             }
                           }}
                         >
@@ -180,14 +254,16 @@ export default function ScheduleBookingScreen() {
           </ScrollView>
         </View>
 
-        {!!selectedSlot && (
+        {!!firstSel && (
           <View style={styles.venueInfoCard}>
             <View style={styles.venueThumb}>
               <ImagePlaceholder height={52} borderRadius={8} label="Sân" imageUrl="https://picsum.photos/seed/schedule-venue/500/300" />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.summaryTitle}>{params.venueName || "Sân bóng Đại học Bách Khoa"}</Text>
-              <Text style={styles.summaryText}>Sân {selectedSlot.fieldName} • Kích thước 30m x 50m</Text>
+              <Text style={styles.summaryText}>
+                Sân {firstSel.fieldName} • {selectedSorted.length} khung ({slotDurationMinutes(firstSel)} phút/khung)
+              </Text>
               <Text style={styles.summaryRating}>⭐ 4.8 (120 đánh giá)</Text>
             </View>
           </View>
@@ -197,30 +273,36 @@ export default function ScheduleBookingScreen() {
           <View style={styles.totalRow}>
             <Ionicons name="time-outline" size={15} color="#8A98A9" />
             <Text style={styles.totalLabel}>Tổng giờ:</Text>
-            <Text style={styles.totalValue}>{selectedSlot ? `${Math.floor(totalMinutes / 60)}h${totalMinutes % 60}` : "--"}</Text>
+            <Text style={styles.totalValue}>
+              {firstSel ? `${Math.floor(totalMinutes / 60)}h${String(totalMinutes % 60).padStart(2, "0")}` : "--"}
+            </Text>
           </View>
           <View style={styles.totalRow}>
             <Ionicons name="wallet-outline" size={15} color="#8A98A9" />
             <Text style={styles.totalLabel}>Tổng tiền:</Text>
             <Text style={styles.totalPrice}>
-              {selectedSlot
-                ? new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(selectedSlot.pricePerSlot)
+              {firstSel
+                ? new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(totalPriceVnd)
                 : "--"}
             </Text>
-            {!!selectedSlot && (
+            {!!firstSel && lastSel && (
               <Text style={styles.totalTag}>
-                {selectedSlot.fieldName}{" "}
-                {new Date(selectedSlot.startTime).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })} -{" "}
-                {new Date(selectedSlot.endTime).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })}
+                {firstSel.fieldName} {slotGridRowKey(firstSel.startTime, selectedDate) ?? "—"} —{" "}
+                {slotGridRowKey(lastSel.endTime, selectedDate) ?? "—"}
               </Text>
             )}
           </View>
         </View>
 
         <Pressable
-          style={[styles.nextButton, (!selectedSlotId || createMutation.isPending) && { opacity: 0.6 }]}
-          disabled={!selectedSlotId || createMutation.isPending}
-          onPress={() => createMutation.mutate(selectedSlotId)}
+          style={[styles.nextButton, (selectedSorted.length === 0 || createMutation.isPending) && { opacity: 0.6 }]}
+          disabled={selectedSorted.length === 0 || createMutation.isPending}
+          onPress={() =>
+            createMutation.mutate({
+              ids: selectedSorted.map((s) => s.id),
+              totalPriceVnd
+            })
+          }
         >
           <Text style={styles.nextButtonText}>{createMutation.isPending ? "Đang xử lý..." : "TIẾP THEO"}</Text>
         </Pressable>
@@ -229,10 +311,180 @@ export default function ScheduleBookingScreen() {
   );
 }
 
-function getDateOffset(offset: number) {
-  const date = new Date();
-  date.setDate(date.getDate() + offset);
-  return date.toISOString().slice(0, 10);
+function slotMs(iso: string) {
+  return new Date(iso).getTime();
+}
+
+function slotDurationMinutes(s: Slot) {
+  return Math.max(0, (slotMs(s.endTime) - slotMs(s.startTime)) / 60000);
+}
+
+function slotPriceVnd(s: Slot) {
+  return Number.isFinite(s.pricePerSlot) ? s.pricePerSlot : 0;
+}
+
+function boundaryLabelMs(gridDateYmd: string, timeLabel: string) {
+  return new Date(`${gridDateYmd}T${timeLabel}:00+07:00`).getTime();
+}
+
+/** HH:mm: phút từ 00:00 ngày `gridDateYmd` (+07) tới `iso`. */
+function slotGridRowKey(iso: string | Date, gridDateYmd: string): string | null {
+  const dayStartMs = new Date(`${gridDateYmd}T00:00:00+07:00`).getTime();
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t) || !Number.isFinite(dayStartMs)) {
+    return null;
+  }
+  const deltaMin = Math.round((t - dayStartMs) / 60000);
+  if (deltaMin < 0 || deltaMin >= 24 * 60) {
+    return null;
+  }
+  const h = Math.floor(deltaMin / 60);
+  const m = deltaMin % 60;
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function pickSlotsInHalfOpen(
+  items: Slot[],
+  fieldName: string,
+  tStart: number,
+  tEndExclusive: number
+): Slot[] | null {
+  if (tEndExclusive <= tStart) {
+    return null;
+  }
+  const row = items
+    .filter((s) => s.fieldName === fieldName)
+    .sort((a, b) => slotMs(a.startTime) - slotMs(b.startTime));
+  const picked = row.filter(
+    (s) => slotMs(s.startTime) >= tStart && slotMs(s.endTime) <= tEndExclusive
+  );
+  if (picked.length === 0) {
+    return null;
+  }
+  for (let i = 1; i < picked.length; i++) {
+    if (slotMs(picked[i].startTime) !== slotMs(picked[i - 1].endTime)) {
+      return null;
+    }
+  }
+  return picked;
+}
+
+function normalizeBoundarySelection(
+  fieldName: string,
+  startLabel: string,
+  endLabel: string,
+  gridDateYmd: string
+): BoundarySelection {
+  return boundaryLabelMs(gridDateYmd, startLabel) <= boundaryLabelMs(gridDateYmd, endLabel)
+    ? { fieldName, startLabel, endLabel }
+    : { fieldName, startLabel: endLabel, endLabel: startLabel };
+}
+
+function slotsFromBoundarySelection(
+  items: Slot[],
+  selection: BoundarySelection | null,
+  gridDateYmd: string
+): Slot[] {
+  if (!selection) {
+    return [];
+  }
+
+  const tStart = boundaryLabelMs(gridDateYmd, selection.startLabel);
+  const tEndExclusive = boundaryLabelMs(gridDateYmd, selection.endLabel);
+  if (!(tEndExclusive > tStart)) {
+    return [];
+  }
+
+  return pickSlotsInHalfOpen(items, selection.fieldName, tStart, tEndExclusive) ?? [];
+}
+
+/**
+ * Timeline coi mỗi ô là một mốc thời gian. Giá/booking lấy các slot nằm giữa mốc đầu và mốc cuối.
+ */
+function applyBoundaryTap(
+  items: Slot[],
+  previous: BoundarySelection | null,
+  fieldName: string,
+  timeLabel: string,
+  gridDateYmd: string,
+  timelineTimes: string[]
+): BoundarySelection | null {
+  if (!previous || previous.fieldName !== fieldName) {
+    return { fieldName, startLabel: timeLabel, endLabel: timeLabel };
+  }
+
+  if (previous.startLabel === previous.endLabel) {
+    if (timeLabel === previous.startLabel) {
+      return null;
+    }
+
+    const candidate = normalizeBoundarySelection(fieldName, previous.startLabel, timeLabel, gridDateYmd);
+    return slotsFromBoundarySelection(items, candidate, gridDateYmd).length > 0
+      ? candidate
+      : { fieldName, startLabel: timeLabel, endLabel: timeLabel };
+  }
+
+  if (timeLabel === previous.startLabel || timeLabel === previous.endLabel) {
+    return { fieldName, startLabel: timeLabel, endLabel: timeLabel };
+  }
+
+  const clickedIdx = timelineTimes.indexOf(timeLabel);
+  const startIdx = timelineTimes.indexOf(previous.startLabel);
+  const endIdx = timelineTimes.indexOf(previous.endLabel);
+  if (clickedIdx === -1 || startIdx === -1 || endIdx === -1) {
+    return { fieldName, startLabel: timeLabel, endLabel: timeLabel };
+  }
+
+  let candidate: BoundarySelection;
+  if (clickedIdx < startIdx) {
+    candidate = { fieldName, startLabel: timeLabel, endLabel: previous.endLabel };
+  } else if (clickedIdx > endIdx) {
+    candidate = { fieldName, startLabel: previous.startLabel, endLabel: timeLabel };
+  } else {
+    const distToStart = clickedIdx - startIdx;
+    const distToEnd = endIdx - clickedIdx;
+    candidate =
+      distToStart <= distToEnd
+        ? { fieldName, startLabel: timeLabel, endLabel: previous.endLabel }
+        : { fieldName, startLabel: previous.startLabel, endLabel: timeLabel };
+  }
+
+  const normalized = normalizeBoundarySelection(
+    candidate.fieldName,
+    candidate.startLabel,
+    candidate.endLabel,
+    gridDateYmd
+  );
+  return slotsFromBoundarySelection(items, normalized, gridDateYmd).length > 0
+    ? normalized
+    : { fieldName, startLabel: timeLabel, endLabel: timeLabel };
+}
+
+const VN_TZ = "Asia/Ho_Chi_Minh";
+
+/** Ngày yyyy-mm-dd theo lịch Việt Nam (đồng bộ query backend). Dùng formatToParts — `en-CA` hay lệch trên Hermes. */
+function getDateOffsetVietnam(offsetDays: number): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: VN_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+
+  const y = Number(parts.find((p) => p.type === "year")?.value);
+  const m = Number(parts.find((p) => p.type === "month")?.value);
+  const d = Number(parts.find((p) => p.type === "day")?.value);
+  if (![y, m, d].every((n) => Number.isFinite(n))) {
+    const iso = new Date().toISOString().slice(0, 10);
+    return iso;
+  }
+
+  const utc = Date.UTC(y, m - 1, d + offsetDays);
+  const dt = new Date(utc);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
 }
 
 const styles = StyleSheet.create({
@@ -254,7 +506,38 @@ const styles = StyleSheet.create({
   dateCellWeek: { fontSize: 10, color: "#7A8898", fontWeight: "700" },
   dateCellText: { fontWeight: "700", color: "#293D54" },
   dateCellTextActive: { color: "#fff" },
-  legendRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 4, paddingHorizontal: 4 },
+  legendBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 4,
+    paddingHorizontal: 4
+  },
+  legendRow: { flexDirection: "row", justifyContent: "space-between", flex: 1 },
+  clearSelectionBtn: { paddingVertical: 4, paddingHorizontal: 6 },
+  clearSelectionText: { color: "#087B57", fontWeight: "800", fontSize: 12 },
+  slotsErrorBox: {
+    borderWidth: 1,
+    borderColor: "#F0CACA",
+    backgroundColor: "#FFF5F5",
+    borderRadius: 10,
+    padding: 10,
+    gap: 6
+  },
+  slotsErrorTitle: { fontWeight: "800", color: "#9B2C2C", fontSize: 14 },
+  slotsErrorText: { color: "#5B6574", fontSize: 12 },
+  slotsErrorHint: { color: "#6C7C91", fontSize: 11, lineHeight: 16 },
+  retryBtnSmall: {
+    alignSelf: "flex-start",
+    backgroundColor: "#087B57",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginTop: 4
+  },
+  retryBtnSmallText: { color: "#fff", fontWeight: "700", fontSize: 13 },
+  slotsEmptyHint: { color: "#6C7C91", fontSize: 12, lineHeight: 18, paddingHorizontal: 2 },
   tableOuter: {
     borderWidth: 1,
     borderColor: "#D5E0EE",
@@ -362,19 +645,8 @@ function buildTimelineLabels() {
   return labels;
 }
 
-function toTimeLabel(iso: string) {
-  const date = new Date(iso);
-  return date.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit", hour12: false });
-}
-
 function weekdayFromDate(dateStr: string) {
-  const d = new Date(dateStr);
-  const wd = d.getDay();
+  const d = new Date(`${dateStr}T12:00:00+07:00`);
+  const wd = d.getUTCDay();
   return wd === 0 ? 8 : wd + 1;
-}
-
-function isDemoAvailable(time: string, fieldIndex: number) {
-  const [h, m] = time.split(":").map(Number);
-  const halfHourIndex = h * 2 + (m === 30 ? 1 : 0);
-  return (halfHourIndex + fieldIndex * 3) % 5 === 0;
 }

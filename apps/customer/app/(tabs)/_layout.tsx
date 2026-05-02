@@ -8,7 +8,14 @@ export default function TabsLayout() {
         headerShown: false,
         tabBarActiveTintColor: "#006C49",
         tabBarInactiveTintColor: "#6C7A71",
-        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" }
+        tabBarLabelStyle: { fontSize: 11, fontWeight: "600" },
+        tabBarStyle: {
+          backgroundColor: "#FFFFFF",
+          borderTopColor: "#DDE5F0",
+          elevation: 12,
+          zIndex: 20
+        },
+        sceneStyle: { backgroundColor: "#F3F6FB" }
       }}
     >
       <Tabs.Screen

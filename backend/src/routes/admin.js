@@ -11,6 +11,7 @@ import {
   validateParams,
   validateQuery
 } from "../utils/validate.js";
+import { computeSlotPriceVnd } from "../lib/slotPricing.js";
 
 export const adminRouter = Router();
 
@@ -240,7 +241,8 @@ adminRouter.post(
           field_id: fieldId,
           start_time: startTs,
           end_time: endTs,
-          status: "available"
+          status: "available",
+          price_vnd: computeSlotPriceVnd(startTs, endTs)
         });
       }
       cursorDate.setUTCDate(cursorDate.getUTCDate() + 1);

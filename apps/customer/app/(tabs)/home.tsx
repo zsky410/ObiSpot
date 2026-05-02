@@ -1,19 +1,21 @@
 import { useQuery } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
-import { router } from "expo-router";
+import { useRouter } from "expo-router";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../../src/components/ImagePlaceholder";
 import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
-import { getVenuesApi } from "../../src/lib/api";
+import { ApiRequestError, getVenuesApi } from "../../src/lib/api";
 
 export default function HomeScreen() {
+  const router = useRouter();
   const venuesQuery = useQuery({
     queryKey: ["venues"],
     queryFn: getVenuesApi
   });
 
-  const displayedVenues = getDisplayedVenues(venuesQuery.data?.items || [], 3);
+  const venueItems = venuesQuery.data?.items || [];
+  const displayedVenues = getDisplayedVenues(venueItems, 3);
 
   function openVenue(venue: { id: string; name: string; address: string }) {
     router.push({
@@ -43,14 +45,34 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {!venuesQuery.isLoading && (venuesQuery.data?.items?.length || 0) === 0 && (
+        {venuesQuery.isError && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorTitle}>Không tải được danh sách chi nhánh</Text>
+            <Text style={styles.errorText}>
+              {venuesQuery.error instanceof ApiRequestError
+                ? venuesQuery.error.message
+                : venuesQuery.error instanceof Error
+                  ? venuesQuery.error.message
+                  : "Lỗi mạng hoặc API không phản hồi."}
+            </Text>
+            <Text style={styles.errorHint}>
+              Kiểm tra backend đang chạy cổng 4000 và cùng WiFi với điện thoại. Trong dev có thể xóa EXPO_PUBLIC_API_BASE_URL trong .env để app tự lấy IP từ Expo. Sau đó restart Expo (--clear).
+            </Text>
+            <Pressable style={styles.retryBtn} onPress={() => venuesQuery.refetch()}>
+              <Text style={styles.retryBtnText}>Thử lại</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {!venuesQuery.isLoading && !venuesQuery.isError && venueItems.length === 0 && (
           <Text style={styles.emptyText}>Chưa có chi nhánh để hiển thị.</Text>
         )}
 
         <FlatList
+          style={styles.venueList}
           data={displayedVenues}
           keyExtractor={(item) => item.id}
-          contentContainerStyle={{ gap: 12, paddingBottom: 18 }}
+          contentContainerStyle={styles.venueListContent}
           renderItem={({ item }) => (
             <Pressable style={styles.venueCard} onPress={() => openVenue(item)}>
               <ImagePlaceholder
@@ -99,6 +121,27 @@ const styles = StyleSheet.create({
   branchTitle: { fontSize: 16, fontWeight: "800", color: "#1D3047" },
   centerLoading: { paddingVertical: 14 },
   emptyText: { color: "#5B6574", marginTop: 4 },
+  errorBox: {
+    borderWidth: 1,
+    borderColor: "#F0CACA",
+    backgroundColor: "#FFF5F5",
+    borderRadius: 12,
+    padding: 12,
+    gap: 8
+  },
+  errorTitle: { fontWeight: "800", color: "#9B2C2C", fontSize: 15 },
+  errorText: { color: "#5B6574", fontSize: 13 },
+  errorHint: { color: "#6C7A71", fontSize: 12, lineHeight: 18 },
+  retryBtn: {
+    alignSelf: "flex-start",
+    backgroundColor: "#087B57",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10
+  },
+  retryBtnText: { color: "#fff", fontWeight: "700" },
+  venueList: { flex: 1 },
+  venueListContent: { gap: 12, paddingBottom: 90 },
   venueCard: {
     borderWidth: 1,
     borderColor: "#D8E1EC",

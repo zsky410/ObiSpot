@@ -1,4 +1,52 @@
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || "http://localhost:4000/api/v1";
+import Constants from "expo-constants";
+import { Platform } from "react-native";
+
+const DEV_BACKEND_PORT = 4000;
+
+function stripTrailingSlash(url: string) {
+  return url.replace(/\/+$/, "");
+}
+
+/** Ưu tiên EXPO_PUBLIC_API_BASE_URL nếu có; không set thì trong dev tự lấy IP từ Expo (đổi WiFi không cần sửa tay). */
+export function resolveApiBaseUrl(): string {
+  const fromEnv = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+  if (fromEnv) {
+    return stripTrailingSlash(fromEnv);
+  }
+
+  if (Platform.OS === "web") {
+    return `http://localhost:${DEV_BACKEND_PORT}/api/v1`;
+  }
+
+  if (__DEV__) {
+    const host = inferDevBundlerHost();
+    if (host && host !== "127.0.0.1" && host !== "localhost") {
+      return `http://${host}:${DEV_BACKEND_PORT}/api/v1`;
+    }
+    if (Platform.OS === "android") {
+      return `http://10.0.2.2:${DEV_BACKEND_PORT}/api/v1`;
+    }
+    return `http://localhost:${DEV_BACKEND_PORT}/api/v1`;
+  }
+
+  return `http://localhost:${DEV_BACKEND_PORT}/api/v1`;
+}
+
+function inferDevBundlerHost(): string | null {
+  const raw =
+    Constants.expoConfig?.hostUri ??
+    Constants.expoGoConfig?.debuggerHost ??
+    (Constants.manifest as { debuggerHost?: string } | null)?.debuggerHost ??
+    (Constants.manifest2 as { extra?: { expoGo?: { debuggerHost?: string } } } | null)?.extra?.expoGo?.debuggerHost;
+
+  if (!raw || typeof raw !== "string") {
+    return null;
+  }
+  const host = raw.includes(":") ? raw.split(":")[0] : raw;
+  return host.length ? host : null;
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 export type ApiError = {
   error?: {
@@ -93,20 +141,26 @@ export async function getSlotsApi(date: string, venueId: string) {
   return apiRequest<{ date: string; items: Slot[] }>(`/slots?date=${date}&venueId=${venueId}`);
 }
 
-export async function createBookingApi(token: string, slotId: string, note?: string) {
+export async function createBookingApi(token: string, slotIds: string[], note?: string) {
+  const body =
+    slotIds.length === 1
+      ? { slotId: slotIds[0], note: note || null }
+      : { slotIds, note: note || null };
+
   return apiRequest<{
     id: string;
+    bookingIds?: string[];
+    slotIds?: string[];
     status: "pending" | "confirmed" | "cancelled";
-    slotId: string;
+    slotId?: string;
     userId: string;
     createdAt: string;
+    rangeStart?: string;
+    rangeEnd?: string;
   }>("/bookings", {
     method: "POST",
     token,
-    body: {
-      slotId,
-      note: note || null
-    }
+    body
   });
 }
 
