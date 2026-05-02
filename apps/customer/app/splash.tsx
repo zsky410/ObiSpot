@@ -54,10 +54,10 @@ export default function SplashScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: "#0F2742" },
-  container: { flex: 1, alignItems: "center", justifyContent: "center" },
+  safe: { flex: 1, backgroundColor: "#FFFFFF" },
+  container: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#FFFFFF" },
   brandWrap: { alignItems: "center", gap: 8 },
   logo: { width: 152, height: 152 },
-  title: { fontSize: 36, fontWeight: "800", color: "#F0F7FF" },
-  subtitle: { fontSize: 14, color: "#BFD2E6" }
+  title: { fontSize: 36, fontWeight: "800", color: "#0F2742" },
+  subtitle: { fontSize: 14, color: "#5E7088" }
 });

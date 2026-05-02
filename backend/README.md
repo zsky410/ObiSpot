@@ -9,14 +9,19 @@
    - `npm run dev`
 
 ## SQL order
-1. Run migration:
+1. Run migrations (theo thứ tự):
    - `backend/db/migrations/001_init.sql`
+   - `backend/db/migrations/002_time_slots_price_vnd.sql` (cột `price_vnd` + hàm `compute_slot_price_vnd`)
+   - (Tuỳ chọn) `backend/db/migrations/003_refresh_available_slots_view.sql` — làm mới view `available_slots` sau khi thêm cột (API `/slots` đã đọc `time_slots` trực tiếp)
 2. Create Supabase Auth users:
    - `customer@obispot.demo`
    - `admin@obispot.demo`
-3. Replace UUID in `backend/db/seeds/001_demo_seed.sql` with real auth user IDs.
-4. Run seed:
-   - `backend/db/seeds/001_demo_seed.sql`
+3. Replace UUID trong `backend/db/seeds/001_demo_seed.sql` bằng auth user IDs thực tế.
+4. Run seeds:
+   - `backend/db/seeds/001_demo_seed.sql` (profiles demo)
+   - `backend/db/seeds/002_three_branches_reset.sql` — **xóa hết booking/slot/sân/chi nhánh cũ**, tạo 3 chi nhánh giả + slot trống 14 ngày (giá theo khung giờ VN).
+
+Để reset lại dữ liệu demo chỉ cần chạy lại `002_three_branches_reset.sql` (sẽ xóa bookings và slots).
 
 ## API base
 - `/api/v1`

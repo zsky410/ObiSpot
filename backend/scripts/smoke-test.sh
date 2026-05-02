@@ -6,7 +6,7 @@ USER_EMAIL="${USER_EMAIL:-user@obispot.demo}"
 USER_PASSWORD="${USER_PASSWORD:-user}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@obispot.demo}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin}"
-VENUE_ID="${VENUE_ID:-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa}"
+VENUE_ID="${VENUE_ID:-11111111-1111-4111-a111-111111111101}"
 
 echo "[1/7] Health"
 curl -fsS "${BASE_URL%/api/v1}/health" >/dev/null

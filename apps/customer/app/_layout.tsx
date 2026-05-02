@@ -1,22 +1,23 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Exo2_800ExtraBold, useFonts } from "@expo-google-fonts/exo-2";
-import { Stack, usePathname, useRouter } from "expo-router";
+import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect, useMemo } from "react";
 import { AuthProvider, useAuth } from "../src/store/auth";
 
 function RootNavigator() {
   const router = useRouter();
-  const pathname = usePathname();
+  const segments = useSegments();
+  const rootSegment = segments[0];
   const { token, bootstrapped } = useAuth();
 
   useEffect(() => {
     if (!bootstrapped) {
       return;
     }
-    if (pathname === "/splash") {
+    if (rootSegment === "splash") {
       return;
     }
-    const isAuthRoute = pathname.startsWith("/(auth)");
+    const isAuthRoute = rootSegment === "(auth)";
     if (!token && !isAuthRoute) {
       router.replace("/(auth)/login");
       return;
@@ -24,7 +25,7 @@ function RootNavigator() {
     if (token && isAuthRoute) {
       router.replace("/(tabs)/home");
     }
-  }, [bootstrapped, pathname, router, token]);
+  }, [bootstrapped, rootSegment, router, token]);
 
   return <Stack screenOptions={{ headerShown: false }} />;
 }

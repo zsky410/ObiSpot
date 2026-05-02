@@ -5,7 +5,7 @@ const USER_EMAIL = process.env.USER_EMAIL || "user@obispot.demo";
 const USER_PASSWORD = process.env.USER_PASSWORD || "user";
 const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@obispot.demo";
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "admin";
-const VENUE_ID = process.env.VENUE_ID || "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+const VENUE_ID = process.env.VENUE_ID || "11111111-1111-4111-a111-111111111101";
 const PARALLEL_REQUESTS = Number(process.env.PARALLEL_REQUESTS || 10);
 
 async function request(path, options = {}) {

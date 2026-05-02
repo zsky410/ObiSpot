@@ -30,28 +30,49 @@ slotsRouter.get(
     const start = new Date(`${date}T00:00:00+07:00`).toISOString();
     const end = new Date(`${date}T23:59:59+07:00`).toISOString();
 
-    const { data, error } = await supabaseAdminClient
-      .from("available_slots")
+    // Đọc trực tiếp time_slots (luôn có mọi cột mới như price_vnd). View available_slots + SELECT ts.*
+    // trong Postgres không tự thêm cột sau ALTER TABLE → select price_vnd trên view có thể lỗi 500.
+    const { data: slotRows, error: slotsError } = await supabaseAdminClient
+      .from("time_slots")
       .select(
-        "id, field_id, start_time, end_time, status, fields:field_id!inner(name, venue_id, price_per_slot)"
+        "id, field_id, start_time, end_time, status, price_vnd, fields:field_id!inner(name, venue_id, price_per_slot)"
       )
+      .eq("status", "available")
+      .eq("fields.venue_id", venueId)
       .gte("start_time", start)
       .lte("start_time", end)
-      .eq("fields.venue_id", venueId)
       .order("start_time", { ascending: true });
 
-    if (error) {
+    if (slotsError) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch slots");
     }
 
-    const items = (data || []).map((slot) => ({
+    const rows = slotRows || [];
+    let bookedSlotIds = new Set();
+    if (rows.length > 0) {
+      const ids = rows.map((s) => s.id);
+      const { data: bookingRows, error: bookingsError } = await supabaseAdminClient
+        .from("bookings")
+        .select("slot_id")
+        .in("slot_id", ids)
+        .in("status", ["pending", "confirmed"]);
+
+      if (bookingsError) {
+        return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booked slots");
+      }
+      bookedSlotIds = new Set((bookingRows || []).map((b) => b.slot_id));
+    }
+
+    const data = rows.filter((s) => !bookedSlotIds.has(s.id));
+
+    const items = data.map((slot) => ({
       id: slot.id,
       fieldId: slot.field_id,
       fieldName: slot.fields?.name || "",
       startTime: slot.start_time,
       endTime: slot.end_time,
       status: slot.status,
-      pricePerSlot: slot.fields?.price_per_slot || 0
+      pricePerSlot: Number(slot.price_vnd ?? slot.fields?.price_per_slot ?? 0)
     }));
 
     return res.status(200).json({ date, items });

@@ -3,8 +3,21 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 export default function BookingSuccessScreen() {
-  const params = useLocalSearchParams<{ bookingId?: string; venueName?: string; selectedDate?: string }>();
+  const params = useLocalSearchParams<{
+    bookingId?: string;
+    venueName?: string;
+    selectedDate?: string;
+    totalPrice?: string;
+    slotCount?: string;
+  }>();
   const bookingCode = (params.bookingId || "SP-20240430-01").slice(0, 12).toUpperCase();
+
+  const totalDisplay =
+    params.totalPrice !== undefined &&
+    params.totalPrice !== "" &&
+    Number.isFinite(Number(params.totalPrice))
+      ? new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(Number(params.totalPrice))
+      : "—";
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -18,8 +31,8 @@ export default function BookingSuccessScreen() {
         <View style={styles.infoBox}>
           <Row label="Mã đơn hàng" value={bookingCode} />
           <Row label="Tên sân" value={params.venueName || "Sân 5 người A - Chảo Lửa"} />
-          <Row label="Ngày đá" value={params.selectedDate || "30/04/2026"} />
-          <Row label="Tổng tiền" value="75.000 đ" highlight />
+          <Row label="Ngày đá" value={params.selectedDate?.split("-").reverse().join("/") || "—"} />
+          <Row label="Tổng tiền" value={totalDisplay} highlight />
         </View>
 
         <View style={styles.noteBox}>
