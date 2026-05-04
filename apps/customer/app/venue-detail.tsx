@@ -87,7 +87,12 @@ export default function VenueDetailScreen() {
           onPress={() =>
             router.push({
               pathname: "/schedule-booking",
-              params: { venueId, venueName, venueAddress }
+              params: {
+                venueId,
+                venueName,
+                venueAddress,
+                pitchFormat: selectedPitchType === "7" ? "7v7" : "5v5"
+              }
             })
           }
         >

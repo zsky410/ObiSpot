@@ -3,10 +3,12 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import Toast from "react-native-toast-message";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
 import { pitchImageByKey } from "../src/lib/pitchImages";
 import { ApiRequestError, createBookingApi, getSlotsApi, type Slot } from "../src/lib/api";
+import { formatVnd, getDateOffsetVietnam, weekdayFromDate } from "../src/lib/dateVietnam";
 import { useAuth } from "../src/store/auth";
 
 type BoundarySelection = {
@@ -18,8 +20,14 @@ type BoundarySelection = {
 export default function ScheduleBookingScreen() {
   const { getValidAccessToken } = useAuth();
   const queryClient = useQueryClient();
-  const params = useLocalSearchParams<{ venueId?: string; venueName?: string; venueAddress?: string }>();
+  const params = useLocalSearchParams<{
+    venueId?: string;
+    venueName?: string;
+    venueAddress?: string;
+    pitchFormat?: string;
+  }>();
   const venueId = params.venueId || "";
+  const pitchFormat: "5v5" | "7v7" = params.pitchFormat === "7v7" ? "7v7" : "5v5";
   const [selectedDate, setSelectedDate] = useState(() => getDateOffsetVietnam(0));
   /** Timeline dùng theo mốc thời gian: chọn mốc bắt đầu và mốc kết thúc, slot thật nằm ở giữa hai mốc. */
   const [selection, setSelection] = useState<BoundarySelection | null>(null);
@@ -38,9 +46,9 @@ export default function ScheduleBookingScreen() {
   );
 
   const slotsQuery = useQuery({
-    queryKey: ["slots", selectedDate, venueId],
+    queryKey: ["slots", selectedDate, venueId, pitchFormat],
     enabled: !!venueId,
-    queryFn: () => getSlotsApi(selectedDate, venueId)
+    queryFn: () => getSlotsApi(selectedDate, venueId, pitchFormat)
   });
 
   const createMutation = useMutation({
@@ -53,9 +61,15 @@ export default function ScheduleBookingScreen() {
       return { data, totalPriceVnd: payload.totalPriceVnd, slotCount: payload.ids.length };
     },
     onSuccess: ({ data, totalPriceVnd, slotCount }) => {
-      queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId] });
+      queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId, pitchFormat] });
       queryClient.invalidateQueries({ queryKey: ["slots"] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      Toast.show({
+        type: "success",
+        text1: "Đặt sân thành công",
+        text2: `${slotCount} khung • ${formatVnd(totalPriceVnd)}`,
+        visibilityTime: 2800
+      });
       router.replace({
         pathname: "/booking-success",
         params: {
@@ -83,10 +97,10 @@ export default function ScheduleBookingScreen() {
   useFocusEffect(
     useCallback(() => {
       if (venueId) {
-        queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId] });
+        queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId, pitchFormat] });
       }
       return undefined;
-    }, [queryClient, selectedDate, venueId])
+    }, [queryClient, selectedDate, venueId, pitchFormat])
   );
 
   const selectedSorted = useMemo(
@@ -102,8 +116,8 @@ export default function ScheduleBookingScreen() {
     if (uniq.length > 0) {
       return uniq;
     }
-    return ["Sân A1", "Sân A2", "Sân A3", "Sân A4"];
-  }, [slotItems]);
+    return pitchFormat === "7v7" ? ["Sân 7A", "Sân 7B", "Sân 7C"] : ["Sân 5A", "Sân 5B", "Sân 5C"];
+  }, [slotItems, pitchFormat]);
 
   const boundaryMap = useMemo(() => {
     const map = new Map<string, Set<string>>();
@@ -156,7 +170,9 @@ export default function ScheduleBookingScreen() {
         </View>
 
         <Text style={styles.dateTitle}>{selectedDate.split("-").reverse().join("/")}</Text>
-        <Text style={styles.dateSub}>Chọn ngày để xem lịch trống theo sân</Text>
+        <Text style={styles.dateSub}>
+          {pitchFormat === "7v7" ? "Sân 7 người" : "Sân 5 người"} — lịch trống theo từng sân
+        </Text>
         <View style={styles.dateRow}>
           {dateOptions.map((item) => {
             const active = selectedDate === item.value;
@@ -473,33 +489,6 @@ function applyBoundaryTap(
     : { fieldName, startLabel: timeLabel, endLabel: timeLabel };
 }
 
-const VN_TZ = "Asia/Ho_Chi_Minh";
-
-/** Ngày yyyy-mm-dd theo lịch Việt Nam (đồng bộ query backend). Dùng formatToParts — `en-CA` hay lệch trên Hermes. */
-function getDateOffsetVietnam(offsetDays: number): string {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: VN_TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(new Date());
-
-  const y = Number(parts.find((p) => p.type === "year")?.value);
-  const m = Number(parts.find((p) => p.type === "month")?.value);
-  const d = Number(parts.find((p) => p.type === "day")?.value);
-  if (![y, m, d].every((n) => Number.isFinite(n))) {
-    const iso = new Date().toISOString().slice(0, 10);
-    return iso;
-  }
-
-  const utc = Date.UTC(y, m - 1, d + offsetDays);
-  const dt = new Date(utc);
-  const yy = dt.getUTCFullYear();
-  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(dt.getUTCDate()).padStart(2, "0");
-  return `${yy}-${mm}-${dd}`;
-}
-
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: "#F5F7FB" },
   container: { padding: 14, gap: 10 },
@@ -658,8 +647,3 @@ function buildTimelineLabels() {
   return labels;
 }
 
-function weekdayFromDate(dateStr: string) {
-  const d = new Date(`${dateStr}T12:00:00+07:00`);
-  const wd = d.getUTCDay();
-  return wd === 0 ? 8 : wd + 1;
-}
