@@ -128,6 +128,7 @@ export type Slot = {
   id: string;
   fieldId: string;
   fieldName: string;
+  pitchFormat?: "5v5" | "7v7";
   startTime: string;
   endTime: string;
   status: "available" | "blocked";
@@ -158,8 +159,12 @@ export async function getVenuesApi() {
   return apiRequest<{ items: Venue[] }>("/venues");
 }
 
-export async function getSlotsApi(date: string, venueId: string) {
-  return apiRequest<{ date: string; items: Slot[] }>(`/slots?date=${date}&venueId=${venueId}`);
+export async function getSlotsApi(date: string, venueId: string, pitchFormat?: "5v5" | "7v7") {
+  const q = new URLSearchParams({ date, venueId });
+  if (pitchFormat) {
+    q.set("pitchFormat", pitchFormat);
+  }
+  return apiRequest<{ date: string; items: Slot[] }>(`/slots?${q.toString()}`);
 }
 
 export async function createBookingApi(token: string, slotIds: string[], note?: string) {

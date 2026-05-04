@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Exo2_800ExtraBold, useFonts } from "@expo-google-fonts/exo-2";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { useEffect, useMemo } from "react";
+import Toast from "react-native-toast-message";
 import { AuthProvider, useAuth } from "../src/store/auth";
 
 function RootNavigator() {
@@ -44,6 +45,7 @@ export default function RootLayout() {
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
         <RootNavigator />
+        <Toast />
       </AuthProvider>
     </QueryClientProvider>
   );

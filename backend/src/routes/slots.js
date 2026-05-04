@@ -9,7 +9,8 @@ export const slotsRouter = Router();
 
 const slotsQuerySchema = z.object({
   date: z.iso.date(),
-  venueId: uuidLikeSchema
+  venueId: uuidLikeSchema,
+  pitchFormat: z.enum(["5v5", "7v7"]).optional()
 });
 
 slotsRouter.get(
@@ -25,23 +26,26 @@ slotsRouter.get(
         { fields: req.validationError }
       );
     }
-    const { date, venueId } = req.validatedQuery;
+    const { date, venueId, pitchFormat } = req.validatedQuery;
 
     const start = new Date(`${date}T00:00:00+07:00`).toISOString();
     const end = new Date(`${date}T23:59:59+07:00`).toISOString();
 
     // Đọc trực tiếp time_slots (luôn có mọi cột mới như price_vnd). View available_slots + SELECT ts.*
     // trong Postgres không tự thêm cột sau ALTER TABLE → select price_vnd trên view có thể lỗi 500.
-    const { data: slotRows, error: slotsError } = await supabaseAdminClient
+    let slotQuery = supabaseAdminClient
       .from("time_slots")
       .select(
-        "id, field_id, start_time, end_time, status, price_vnd, fields:field_id!inner(name, venue_id, price_per_slot)"
+        "id, field_id, start_time, end_time, status, price_vnd, fields:field_id!inner(name, venue_id, price_per_slot, pitch_format)"
       )
       .eq("status", "available")
       .eq("fields.venue_id", venueId)
       .gte("start_time", start)
-      .lte("start_time", end)
-      .order("start_time", { ascending: true });
+      .lte("start_time", end);
+    if (pitchFormat) {
+      slotQuery = slotQuery.eq("fields.pitch_format", pitchFormat);
+    }
+    const { data: slotRows, error: slotsError } = await slotQuery.order("start_time", { ascending: true });
 
     if (slotsError) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch slots");
@@ -69,6 +73,7 @@ slotsRouter.get(
       id: slot.id,
       fieldId: slot.field_id,
       fieldName: slot.fields?.name || "",
+      pitchFormat: slot.fields?.pitch_format || "5v5",
       startTime: slot.start_time,
       endTime: slot.end_time,
       status: slot.status,
