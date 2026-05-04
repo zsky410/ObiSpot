@@ -1,4 +1,5 @@
 import express from "express";
+import cors from "cors";
 import { authRouter } from "./routes/auth.js";
 import { venuesRouter } from "./routes/venues.js";
 import { slotsRouter } from "./routes/slots.js";
@@ -12,6 +13,12 @@ import { asyncHandler, sendError } from "./utils/http.js";
 
 export const app = express();
 
+app.use(
+  cors({
+    origin: true,
+    credentials: false
+  })
+);
 app.use(express.json());
 app.use(requestLogger);
 
