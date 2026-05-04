@@ -67,6 +67,13 @@ export class ApiRequestError extends Error {
   }
 }
 
+export type AuthSessionPayload = {
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number | null;
+  user: { id: string; fullName: string; role: string };
+};
+
 type RequestOptions = {
   method?: "GET" | "POST" | "PATCH";
   token?: string | null;
@@ -98,12 +105,16 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
 }
 
 export async function loginApi(email: string, password: string) {
-  return apiRequest<{
-    accessToken: string;
-    user: { id: string; fullName: string; role: string };
-  }>("/auth/login", {
+  return apiRequest<AuthSessionPayload>("/auth/login", {
     method: "POST",
     body: { email, password }
+  });
+}
+
+export async function refreshSessionApi(refreshToken: string) {
+  return apiRequest<AuthSessionPayload>("/auth/refresh", {
+    method: "POST",
+    body: { refreshToken }
   });
 }
 
@@ -126,10 +137,20 @@ export type Slot = {
 export type MyBooking = {
   id: string;
   status: "pending" | "confirmed" | "cancelled";
+  createdAt: string | null;
+  note: string | null;
   slot: {
     id: string | null;
     startTime: string | null;
+    endTime: string | null;
     fieldName: string;
+    pricePerSlot: number;
+    slotCount?: number;
+  };
+  venue: {
+    id: string | null;
+    name: string;
+    address: string;
   };
 };
 

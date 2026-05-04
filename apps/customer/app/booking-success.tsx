@@ -1,16 +1,20 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
+import { pitchImageByKey } from "../src/lib/pitchImages";
 
 export default function BookingSuccessScreen() {
   const params = useLocalSearchParams<{
     bookingId?: string;
+    venueId?: string;
     venueName?: string;
     selectedDate?: string;
     totalPrice?: string;
     slotCount?: string;
   }>();
   const bookingCode = (params.bookingId || "SP-20240430-01").slice(0, 12).toUpperCase();
+  const heroKey = params.venueId || params.bookingId || "success";
 
   const totalDisplay =
     params.totalPrice !== undefined &&
@@ -27,6 +31,10 @@ export default function BookingSuccessScreen() {
         </View>
         <Text style={styles.title}>Đặt sân thành công!</Text>
         <Text style={styles.subtitle}>Đơn đặt sân của bạn đã được xác nhận. Thông tin chi tiết bên dưới.</Text>
+
+        <View style={styles.heroThumb}>
+          <ImagePlaceholder height={120} borderRadius={12} source={pitchImageByKey(heroKey)} />
+        </View>
 
         <View style={styles.infoBox}>
           <Row label="Mã đơn hàng" value={bookingCode} />
@@ -74,6 +82,7 @@ const styles = StyleSheet.create({
   icon: { fontSize: 38, color: "#067E57", fontWeight: "700" },
   title: { textAlign: "center", fontSize: 34, fontWeight: "800", color: "#1B2D42" },
   subtitle: { textAlign: "center", color: "#5D6D82" },
+  heroThumb: { width: "100%", maxWidth: 320, alignSelf: "center" },
   infoBox: { backgroundColor: "#fff", borderRadius: 12, borderWidth: 1, borderColor: "#D9E2EF", padding: 12, gap: 10 },
   row: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
   rowLabel: { color: "#64778E" },

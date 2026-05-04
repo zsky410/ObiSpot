@@ -1,4 +1,4 @@
--- Demo UI A-Z: 3 chi nhánh giả địa chỉ, xóa hết booking & slot cũ, sinh slot 30 phút 05:00–22:30 (14 ngày từ “hôm nay” theo giờ VN).
+-- Demo: 3 chi nhánh Đà Nẵng; xóa booking & slot cũ; sinh slot 30 phút 05:00–22:30 (14 ngày từ “hôm nay” theo giờ VN).
 -- Chạy sau migrations (002_time_slots_price_vnd.sql). Profiles giữ nguyên — không đụng bảng profiles.
 
 delete from bookings;
@@ -10,22 +10,22 @@ insert into venues (id, name, address, open_time, close_time)
 values
   (
     '11111111-1111-4111-a111-111111111101',
-    'ObiSpot Chi nhánh Quận 1',
-    '123 Nguyễn Huệ, Phường Bến Nghé, Quận 1, TP.HCM',
+    'ObiSpot 1 - Chi nhánh Sơn Trà',
+    '82 Hồ Nghinh, An Hải, Đà Nẵng 550000, Vietnam',
     '05:00',
     '23:00'
   ),
   (
     '11111111-1111-4111-a111-111111111102',
-    'ObiSpot Chi nhánh Thủ Đức',
-    '456 Võ Văn Ngân, TP. Thủ Đức, TP.HCM',
+    'ObiSpot 2 - Chi nhánh Liên Chiểu',
+    '41-39 Giáp Văn Cương, Hòa Khánh, Đà Nẵng 550000, Vietnam',
     '05:00',
     '23:00'
   ),
   (
     '11111111-1111-4111-a111-111111111103',
-    'ObiSpot Chi nhánh Bình Thạnh',
-    '789 Đinh Bộ Lĩnh, Phường 26, Quận Bình Thạnh, TP.HCM',
+    'ObiSpot 3 - Chi nhánh Cẩm Lệ',
+    '8 Đ. Nguyễn Nhàn, Cẩm Lệ, Đà Nẵng 550000, Vietnam',
     '05:00',
     '23:00'
   );

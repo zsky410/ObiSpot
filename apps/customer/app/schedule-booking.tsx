@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
-import { router, useLocalSearchParams } from "expo-router";
-import { useMemo, useState } from "react";
+import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
+import { pitchImageByKey } from "../src/lib/pitchImages";
 import { ApiRequestError, createBookingApi, getSlotsApi, type Slot } from "../src/lib/api";
 import { useAuth } from "../src/store/auth";
 
@@ -15,7 +16,7 @@ type BoundarySelection = {
 };
 
 export default function ScheduleBookingScreen() {
-  const { token } = useAuth();
+  const { getValidAccessToken } = useAuth();
   const queryClient = useQueryClient();
   const params = useLocalSearchParams<{ venueId?: string; venueName?: string; venueAddress?: string }>();
   const venueId = params.venueId || "";
@@ -44,19 +45,22 @@ export default function ScheduleBookingScreen() {
 
   const createMutation = useMutation({
     mutationFn: async (payload: { ids: string[]; totalPriceVnd: number }) => {
-      if (!token) {
-        throw new Error("Thiếu token đăng nhập");
+      const accessToken = await getValidAccessToken();
+      if (!accessToken) {
+        throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
       }
-      const data = await createBookingApi(token, payload.ids, "Đặt từ màn đặt lịch trực quan");
+      const data = await createBookingApi(accessToken, payload.ids, "Đặt từ màn đặt lịch trực quan");
       return { data, totalPriceVnd: payload.totalPriceVnd, slotCount: payload.ids.length };
     },
     onSuccess: ({ data, totalPriceVnd, slotCount }) => {
+      queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId] });
       queryClient.invalidateQueries({ queryKey: ["slots"] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
       router.replace({
         pathname: "/booking-success",
         params: {
           bookingId: data.id,
+          venueId: venueId || "",
           venueName: params.venueName || "Sân",
           selectedDate,
           totalPrice: String(totalPriceVnd),
@@ -75,6 +79,15 @@ export default function ScheduleBookingScreen() {
 
   const slotItems = slotsQuery.data?.items ?? [];
   const timelineTimes = useMemo(() => buildTimelineLabels(), []);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (venueId) {
+        queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId] });
+      }
+      return undefined;
+    }, [queryClient, selectedDate, venueId])
+  );
 
   const selectedSorted = useMemo(
     () => slotsFromBoundarySelection(slotItems, selection, selectedDate),
@@ -257,7 +270,7 @@ export default function ScheduleBookingScreen() {
         {!!firstSel && (
           <View style={styles.venueInfoCard}>
             <View style={styles.venueThumb}>
-              <ImagePlaceholder height={52} borderRadius={8} label="Sân" imageUrl="https://picsum.photos/seed/schedule-venue/500/300" />
+              <ImagePlaceholder height={52} borderRadius={8} source={pitchImageByKey(venueId || "schedule")} />
             </View>
             <View style={{ flex: 1 }}>
               <Text style={styles.summaryTitle}>{params.venueName || "Sân bóng Đại học Bách Khoa"}</Text>

@@ -1,35 +1,43 @@
-import { ImageBackground, StyleSheet, Text, View } from "react-native";
+import { ImageBackground, StyleSheet, Text, View, type ImageSourcePropType } from "react-native";
+import { pitchImageByKey } from "../lib/pitchImages";
 
 type Props = {
   height?: number;
   label?: string;
+  /** Ảnh local (`require(...)`) hoặc để trống để dùng `imageUrl` / fallback theo `label`. */
+  source?: ImageSourcePropType;
   imageUrl?: string;
   borderRadius?: number;
   showBorder?: boolean;
+  /** Lớp mờ + chữ — tắt khi hiển thị ảnh sân thật. */
+  showOverlay?: boolean;
 };
 
 export function ImagePlaceholder({
   height = 160,
   label = "Image placeholder",
+  source,
   imageUrl,
   borderRadius = 14,
-  showBorder = true
+  showBorder = true,
+  showOverlay = false
 }: Props) {
   const seed = encodeURIComponent(label.toLowerCase().replace(/\s+/g, "-"));
-  const source = {
-    uri: imageUrl || `https://picsum.photos/seed/${seed}/1200/800`
-  };
+  const resolvedSource: ImageSourcePropType =
+    source ?? (imageUrl ? { uri: imageUrl } : pitchImageByKey(seed));
 
   return (
     <ImageBackground
-      source={source}
+      source={resolvedSource}
       resizeMode="cover"
       style={[styles.box, { height, borderRadius, borderWidth: showBorder ? 1 : 0 }]}
       imageStyle={[styles.image, { borderRadius }]}
     >
-      <View style={[styles.overlay, { borderRadius }]}>
-        <Text style={styles.text}>{label}</Text>
-      </View>
+      {showOverlay ? (
+        <View style={[styles.overlay, { borderRadius }]}>
+          {label ? <Text style={styles.text}>{label}</Text> : null}
+        </View>
+      ) : null}
     </ImageBackground>
   );
 }

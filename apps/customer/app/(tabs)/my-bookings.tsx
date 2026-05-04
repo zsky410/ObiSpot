@@ -1,28 +1,39 @@
-import { useQuery } from "@tanstack/react-query";
-import { router } from "expo-router";
-import { useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { router, useFocusEffect } from "expo-router";
+import { useCallback, useMemo, useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { MyBooking, getMyBookingsApi } from "../../src/lib/api";
+import { ApiRequestError, MyBooking, getMyBookingsApi } from "../../src/lib/api";
+import { pitchImageByKey } from "../../src/lib/pitchImages";
 import { ImagePlaceholder } from "../../src/components/ImagePlaceholder";
 import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
 import { useAuth } from "../../src/store/auth";
 
 export default function MyBookingsScreen() {
-  const { token } = useAuth();
+  const queryClient = useQueryClient();
+  const { token, bootstrapped, getValidAccessToken, user } = useAuth();
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "confirmed" | "cancelled">("all");
 
   const bookingsQuery = useQuery({
-    queryKey: ["my-bookings"],
-    queryFn: () => {
-      if (!token) {
-        throw new Error("Thiếu token");
+    queryKey: ["my-bookings", user?.id ?? "_"],
+    queryFn: async () => {
+      const accessToken = await getValidAccessToken();
+      if (!accessToken) {
+        throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
       }
-      return getMyBookingsApi(token);
+      return getMyBookingsApi(accessToken);
     },
-    enabled: !!token
+    enabled: bootstrapped && !!token && !!user?.id
   });
+
+  useFocusEffect(
+    useCallback(() => {
+      if (bootstrapped && token) {
+        queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      }
+    }, [bootstrapped, token, queryClient])
+  );
 
   const filteredData = useMemo(() => {
     const items = bookingsQuery.data?.items || [];
@@ -68,7 +79,23 @@ export default function MyBookingsScreen() {
           </View>
         )}
 
-        {!bookingsQuery.isLoading && filteredData.length === 0 && (
+        {bookingsQuery.isError && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorTitle}>Không tải được lịch đặt</Text>
+            <Text style={styles.errorText}>
+              {bookingsQuery.error instanceof ApiRequestError
+                ? bookingsQuery.error.message
+                : bookingsQuery.error instanceof Error
+                  ? bookingsQuery.error.message
+                  : "Lỗi mạng hoặc phiên đăng nhập không còn hợp lệ."}
+            </Text>
+            <Pressable style={styles.retryBtn} onPress={() => bookingsQuery.refetch()}>
+              <Text style={styles.retryBtnText}>Thử lại</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {!bookingsQuery.isLoading && !bookingsQuery.isError && filteredData.length === 0 && (
           <Text style={styles.emptyText}>Chưa có booking phù hợp với bộ lọc.</Text>
         )}
 
@@ -76,6 +103,8 @@ export default function MyBookingsScreen() {
           data={filteredData}
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ gap: 10, paddingBottom: 16 }}
+          refreshing={bookingsQuery.isRefetching}
+          onRefresh={() => bookingsQuery.refetch()}
           renderItem={({ item }) => <BookingItem item={item} />}
         />
       </View>
@@ -90,6 +119,15 @@ function BookingItem({ item }: { item: MyBooking }) {
     cancelled: { label: "Đã hủy", color: "#BA1A1A", bg: "#FFE8E8" }
   };
   const status = statusMap[item.status];
+  const fieldTitle = item.slot.fieldName?.trim() || "—";
+  const venueLine = [item.venue.name?.trim(), item.venue.address?.trim()].filter(Boolean).join(" · ");
+  const thumbKey = item.venue.id || item.id;
+  const notePreview = item.note?.trim()
+    ? item.note.trim().length > 80
+      ? `${item.note.trim().slice(0, 80)}…`
+      : item.note.trim()
+    : null;
+
   return (
     <Pressable style={styles.card} onPress={() => router.push({ pathname: "/booking-detail", params: { bookingId: item.id } })}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 10 }}>
@@ -97,37 +135,66 @@ function BookingItem({ item }: { item: MyBooking }) {
           <View style={[styles.badge, { backgroundColor: status.bg, alignSelf: "flex-start" }]}>
             <Text style={[styles.badgeText, { color: status.color }]}>{status.label}</Text>
           </View>
-          <Text style={styles.cardTitle}>{item.slot.fieldName || "Sân 5 người A - Chảo Lửa"}</Text>
-          <Text style={styles.metaText}>📍 Quận Tân Bình, TP.HCM</Text>
+          <Text style={styles.orderId}>Mã đơn #{item.id.slice(0, 8).toUpperCase()}</Text>
+          <Text style={styles.cardTitle}>{fieldTitle}</Text>
+          <Text style={styles.metaText}>{venueLine ? `📍 ${venueLine}` : "📍 —"}</Text>
+          {notePreview ? (
+            <Text style={styles.noteText} numberOfLines={2}>
+              Ghi chú: {notePreview}
+            </Text>
+          ) : null}
         </View>
         <View style={styles.thumb}>
-          <ImagePlaceholder
-            height={56}
-            label="Ảnh sân"
-            imageUrl={`https://picsum.photos/seed/booking-${item.id}/800/500`}
-          />
+          <ImagePlaceholder height={56} source={pitchImageByKey(thumbKey)} />
         </View>
       </View>
       <View style={styles.cardFooter}>
-        <View>
-          <Text style={styles.metaText}>Thời gian</Text>
-          <Text style={styles.timeText}>
-            {item.slot.startTime
-              ? new Date(item.slot.startTime).toLocaleString("vi-VN", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  day: "2-digit",
-                  month: "2-digit"
-                })
-              : "20:00, 15/10"}
-          </Text>
+        <View style={{ flex: 1, marginRight: 8 }}>
+          <Text style={styles.metaText}>Khung giờ</Text>
+          <Text style={styles.timeText}>{formatBookingTimeRange(item)}</Text>
+          {item.createdAt ? (
+            <Text style={styles.createdText}>Đặt lúc {formatCreatedAt(item.createdAt)}</Text>
+          ) : null}
         </View>
-        <View style={[styles.badge, { backgroundColor: status.bg }]}>
-          <Text style={[styles.badgeText, { color: status.color }]}>{item.status === "pending" ? "Hủy đặt" : item.status === "confirmed" ? "Chỉ đường" : "Đặt lại"}</Text>
+        <View style={styles.priceCol}>
+          <Text style={styles.priceLabel}>Giá slot</Text>
+          <Text style={styles.priceValue}>{formatVnd(item.slot.pricePerSlot)}</Text>
+          <Text style={styles.detailHint}>Chi tiết ›</Text>
         </View>
       </View>
     </Pressable>
   );
+}
+
+const VN_TZ = "Asia/Ho_Chi_Minh";
+
+function formatBookingTimeRange(item: MyBooking) {
+  if (!item.slot.startTime || !item.slot.endTime) {
+    return "—";
+  }
+  const start = new Date(item.slot.startTime);
+  const end = new Date(item.slot.endTime);
+  const dateLabel = start.toLocaleDateString("vi-VN", { timeZone: VN_TZ, day: "2-digit", month: "2-digit", year: "numeric" });
+  const startLabel = start.toLocaleTimeString("vi-VN", { timeZone: VN_TZ, hour: "2-digit", minute: "2-digit" });
+  const endLabel = end.toLocaleTimeString("vi-VN", { timeZone: VN_TZ, hour: "2-digit", minute: "2-digit" });
+  return `${startLabel} – ${endLabel}, ${dateLabel}`;
+}
+
+function formatCreatedAt(iso: string) {
+  const d = new Date(iso);
+  return d.toLocaleString("vi-VN", {
+    timeZone: VN_TZ,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function formatVnd(value: number) {
+  const n = Number.isFinite(value) ? value : 0;
+  return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(n);
 }
 
 const styles = StyleSheet.create({
@@ -147,6 +214,24 @@ const styles = StyleSheet.create({
   pillText: { color: "#5E6F83", fontSize: 12, fontWeight: "700" },
   pillTextActive: { color: "#1F3248" },
   emptyText: { color: "#5B6574", marginTop: 10 },
+  errorBox: {
+    borderWidth: 1,
+    borderColor: "#F0CACA",
+    backgroundColor: "#FFF5F5",
+    borderRadius: 12,
+    padding: 12,
+    gap: 8
+  },
+  errorTitle: { fontWeight: "800", color: "#9B2C2C", fontSize: 15 },
+  errorText: { color: "#5B6574", fontSize: 13 },
+  retryBtn: {
+    alignSelf: "flex-start",
+    backgroundColor: "#087B57",
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 10
+  },
+  retryBtnText: { color: "#fff", fontWeight: "700" },
   card: {
     borderColor: "#DFE7F2",
     borderWidth: 1,
@@ -155,10 +240,17 @@ const styles = StyleSheet.create({
     backgroundColor: "#fff",
     gap: 8
   },
+  orderId: { fontSize: 11, fontWeight: "700", color: "#6B7D94", marginTop: 4, letterSpacing: 0.3 },
   cardTitle: { fontSize: 20, fontWeight: "800", color: "#0B1C30", flex: 1 },
   metaText: { color: "#5B6574" },
-  cardFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  noteText: { color: "#4A5A6E", fontSize: 12, marginTop: 4, fontStyle: "italic" },
+  cardFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" },
   timeText: { color: "#21364E", fontWeight: "800", marginTop: 3 },
+  createdText: { color: "#8A98A9", fontSize: 11, marginTop: 4 },
+  priceCol: { alignItems: "flex-end" },
+  priceLabel: { fontSize: 10, color: "#8A98A9", fontWeight: "600" },
+  priceValue: { fontSize: 15, fontWeight: "800", color: "#087B57", marginTop: 2 },
+  detailHint: { fontSize: 11, color: "#6C7B90", marginTop: 4, fontWeight: "600" },
   thumb: { width: 70 },
   badge: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5 },
   badgeText: { fontSize: 12, fontWeight: "700" }
