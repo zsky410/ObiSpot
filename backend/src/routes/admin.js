@@ -21,6 +21,13 @@ const adminBookingsQuerySchema = z.object({
   date: z.iso.date().optional(),
   status: z.enum(["pending", "confirmed", "cancelled"]).optional()
 });
+const adminSlotsQuerySchema = z.object({
+  date: z.iso.date(),
+  venueId: uuidLikeSchema
+});
+const adminFieldsQuerySchema = z.object({
+  venueId: uuidLikeSchema
+});
 const bookingParamsSchema = z.object({
   bookingId: uuidLikeSchema
 });
@@ -75,7 +82,9 @@ adminRouter.get(
     const { date, status } = req.validatedQuery;
     let query = supabaseAdminClient
       .from("bookings")
-      .select("id, status, created_at, user_id, slot_id, time_slots:slot_id(start_time)");
+      .select(
+        "id, status, created_at, user_id, slot_id, profiles:user_id(full_name), time_slots:slot_id(start_time, end_time, fields:field_id(name, venue_id))"
+      );
 
     if (status) {
       query = query.eq("status", status);
@@ -86,14 +95,23 @@ adminRouter.get(
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin bookings");
     }
 
-    let items = (data || []).map((item) => ({
-      id: item.id,
-      status: item.status,
-      createdAt: item.created_at,
-      userId: item.user_id,
-      slotId: item.slot_id,
-      slotStartTime: item.time_slots?.start_time || null
-    }));
+    let items = (data || []).map((item) => {
+      const profile = Array.isArray(item.profiles) ? item.profiles[0] : item.profiles;
+      const timeSlot = Array.isArray(item.time_slots) ? item.time_slots[0] : item.time_slots;
+      const field = Array.isArray(timeSlot?.fields) ? timeSlot.fields[0] : timeSlot?.fields;
+      return {
+        id: item.id,
+        status: item.status,
+        createdAt: item.created_at,
+        userId: item.user_id,
+        customerName: profile?.full_name || "",
+        slotId: item.slot_id,
+        slotStartTime: timeSlot?.start_time || null,
+        slotEndTime: timeSlot?.end_time || null,
+        fieldName: field?.name || "",
+        venueId: field?.venue_id || null
+      };
+    });
 
     if (date) {
       items = items.filter((item) => {
@@ -163,6 +181,79 @@ adminRouter.patch(
       userId: data.user_id,
       createdAt: data.created_at
     });
+  })
+);
+
+adminRouter.get(
+  "/fields",
+  validateQuery(adminFieldsQuerySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid admin fields query params",
+        { fields: req.validationError }
+      );
+    }
+    const { venueId } = req.validatedQuery;
+    const { data, error } = await supabaseAdminClient
+      .from("fields")
+      .select("id, name, venue_id")
+      .eq("venue_id", venueId)
+      .order("name", { ascending: true });
+    if (error) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch fields");
+    }
+    return res.status(200).json({
+      items: (data || []).map((f) => ({ id: f.id, name: f.name, venueId: f.venue_id }))
+    });
+  })
+);
+
+adminRouter.get(
+  "/slots",
+  validateQuery(adminSlotsQuerySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid admin slots query params",
+        { fields: req.validationError }
+      );
+    }
+    const { date, venueId } = req.validatedQuery;
+    const start = new Date(`${date}T00:00:00+07:00`).toISOString();
+    const end = new Date(`${date}T23:59:59+07:00`).toISOString();
+
+    const { data, error } = await supabaseAdminClient
+      .from("time_slots")
+      .select("id, field_id, start_time, end_time, status, fields:field_id(name, venue_id)")
+      .eq("fields.venue_id", venueId)
+      .gte("start_time", start)
+      .lte("start_time", end)
+      .order("start_time", { ascending: true });
+
+    if (error) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin slots");
+    }
+
+    const items = (data || []).map((slot) => {
+      const field = Array.isArray(slot.fields) ? slot.fields[0] : slot.fields;
+      return {
+        id: slot.id,
+        fieldId: slot.field_id,
+        fieldName: field?.name || "",
+        startTime: slot.start_time,
+        endTime: slot.end_time,
+        status: slot.status
+      };
+    });
+
+    return res.status(200).json({ date, venueId, items });
   })
 );
 
