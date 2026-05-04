@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Link, router } from "expo-router";
 import { useState } from "react";
 import {
@@ -15,6 +16,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useAuth } from "../../src/store/auth";
 
 export default function LoginScreen() {
+  const queryClient = useQueryClient();
   const { signIn } = useAuth();
   const [email, setEmail] = useState("user@obispot.demo");
   const [password, setPassword] = useState("user");
@@ -26,6 +28,7 @@ export default function LoginScreen() {
     setError("");
     try {
       await signIn(email, password);
+      queryClient.removeQueries({ queryKey: ["my-bookings"] });
       router.replace("/(tabs)/home");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Đăng nhập thất bại");

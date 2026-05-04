@@ -6,6 +6,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../../src/components/ImagePlaceholder";
 import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
 import { ApiRequestError, getVenuesApi } from "../../src/lib/api";
+import { pitchImageByKey } from "../../src/lib/pitchImages";
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -75,11 +76,7 @@ export default function HomeScreen() {
           contentContainerStyle={styles.venueListContent}
           renderItem={({ item }) => (
             <Pressable style={styles.venueCard} onPress={() => openVenue(item)}>
-              <ImagePlaceholder
-                height={132}
-                label="Ảnh sân"
-                imageUrl={`https://picsum.photos/seed/venue-${item.id}/1200/700`}
-              />
+              <ImagePlaceholder height={132} source={pitchImageByKey(item.id)} />
               <View style={styles.ratingTag}>
                 <Text style={styles.ratingText}>★ 4.8</Text>
               </View>
@@ -161,7 +158,7 @@ const styles = StyleSheet.create({
     paddingVertical: 4
   },
   ratingText: { color: "#184D66", fontWeight: "700", fontSize: 12 },
-  venueTitle: { fontSize: 32, fontWeight: "800", color: "#091A2D", lineHeight: 36 },
+  venueTitle: { fontSize: 20, fontWeight: "800", color: "#091A2D", lineHeight: 26 },
   venueAddress: { color: "#4B5A6C" },
   badges: { flexDirection: "row", gap: 8, marginTop: 2 },
   badge: {

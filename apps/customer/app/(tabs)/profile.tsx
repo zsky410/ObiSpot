@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { ActivityIndicator, Pressable, SafeAreaView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -5,6 +6,7 @@ import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
 import { useAuth } from "../../src/store/auth";
 
 export default function ProfileScreen() {
+  const queryClient = useQueryClient();
   const { user, signOut } = useAuth();
   const [loading, setLoading] = useState(false);
 
@@ -12,6 +14,7 @@ export default function ProfileScreen() {
     setLoading(true);
     try {
       await signOut();
+      queryClient.removeQueries({ queryKey: ["my-bookings"] });
     } finally {
       setLoading(false);
     }

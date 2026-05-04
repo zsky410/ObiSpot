@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
+import { pitchImageByKey } from "../src/lib/pitchImages";
 
 export default function VenueDetailScreen() {
   const insets = useSafeAreaInsets();
@@ -24,8 +25,7 @@ export default function VenueDetailScreen() {
         <View style={styles.heroWrap}>
           <ImagePlaceholder
             height={220}
-            label="Ảnh chi tiết sân"
-            imageUrl={`https://picsum.photos/seed/venue-detail-${venueId || "default"}/1400/900`}
+            source={pitchImageByKey(venueId || "default")}
             borderRadius={0}
             showBorder={false}
           />
@@ -137,11 +137,11 @@ const styles = StyleSheet.create({
     marginTop: -22
   },
   titleRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 10 },
-  title: { flex: 1, fontSize: 38, lineHeight: 40, fontWeight: "800", color: "#0B1C30" },
+  title: { flex: 1, fontSize: 22, lineHeight: 28, fontWeight: "800", color: "#0B1C30" },
   ratingPill: { backgroundColor: "#E9F0FB", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
   rating: { color: "#5D6B80", fontWeight: "700" },
   address: { color: "#5B6678" },
-  sectionTitle: { marginTop: 4, fontSize: 24, fontWeight: "800", color: "#0B1C30" },
+  sectionTitle: { marginTop: 6, fontSize: 17, lineHeight: 22, fontWeight: "700", color: "#0B1C30" },
   bodyText: { color: "#4E5D70", lineHeight: 20 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   gridItem: {
