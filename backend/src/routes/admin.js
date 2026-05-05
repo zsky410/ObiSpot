@@ -12,7 +12,8 @@ import {
   validateQuery
 } from "../utils/validate.js";
 import { computeSlotPriceVnd } from "../lib/slotPricing.js";
-import { ensureVenueDailySlots, isDateInRollingWindow } from "../lib/slotAutoSeed.js";
+import { buildSlotKey, ensureVenueDailySlots, isDateInRollingWindow } from "../lib/slotAutoSeed.js";
+import { selectAllPages } from "../lib/supabasePaginate.js";
 
 export const adminRouter = Router();
 
@@ -306,16 +307,20 @@ adminRouter.get(
         dailyEnd: "23:00"
       });
     }
-    const start = new Date(`${date}T00:00:00+07:00`).toISOString();
-    const end = new Date(`${date}T23:59:59+07:00`).toISOString();
+    const dayStart = new Date(`${date}T00:00:00+07:00`).toISOString();
+    const dayEndExclusive = new Date(new Date(`${date}T00:00:00+07:00`).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-    const { data, error } = await supabaseAdminClient
-      .from("time_slots")
-      .select("id, field_id, start_time, end_time, status, fields:field_id(name, venue_id)")
-      .eq("fields.venue_id", venueId)
-      .gte("start_time", start)
-      .lte("start_time", end)
-      .order("start_time", { ascending: true });
+    const { data, error } = await selectAllPages(() =>
+      supabaseAdminClient
+        .from("time_slots")
+        .select("id, field_id, start_time, end_time, status, fields:field_id!inner(name, venue_id)")
+        .eq("fields.venue_id", venueId)
+        .lt("start_time", dayEndExclusive)
+        .gt("end_time", dayStart)
+        .order("field_id", { ascending: true })
+        .order("start_time", { ascending: true })
+        .order("id", { ascending: true })
+    );
 
     if (error) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin slots");
@@ -404,9 +409,7 @@ adminRouter.post(
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to read existing slots");
     }
 
-    const existingKeys = new Set(
-      (existing || []).map((slot) => `${slot.start_time}|${slot.end_time}`)
-    );
+    const existingKeys = new Set((existing || []).map((slot) => buildSlotKey(fieldId, slot.start_time, slot.end_time)));
     const rowsToInsert = [];
     let cursorDate = new Date(`${fromDate}T00:00:00Z`);
     const endDate = new Date(`${toDate}T00:00:00Z`);
@@ -424,7 +427,7 @@ adminRouter.post(
         const endHm = formatHmFromMinutes(end);
         const startTs = localTimestamp(dateStr, startHm);
         const endTs = localTimestamp(dateStr, endHm);
-        const key = `${new Date(startTs).toISOString()}|${new Date(endTs).toISOString()}`;
+        const key = buildSlotKey(fieldId, startTs, endTs);
 
         if (existingKeys.has(key)) {
           skippedCount += 1;
