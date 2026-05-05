@@ -28,7 +28,7 @@ export default function ScheduleBookingScreen() {
   const venueId = params.venueId || "";
   const pitchFormat: "5v5" | "7v7" = params.pitchFormat === "7v7" ? "7v7" : "5v5";
   const [selectedDate, setSelectedDate] = useState(() => getDateOffsetVietnam(0));
-  /** Timeline dùng theo mốc thời gian: chọn mốc bắt đầu và mốc kết thúc, slot thật nằm ở giữa hai mốc. */
+  /** Timeline dùng theo mốc thời gian: chọn giờ bắt đầu và giờ kết thúc, slot thật nằm ở giữa hai mốc. */
   const [selection, setSelection] = useState<BoundarySelection | null>(null);
 
   function clearRangeSelection() {
@@ -83,7 +83,20 @@ export default function ScheduleBookingScreen() {
     }
   });
 
-  const slotItems = slotsQuery.data?.items ?? [];
+  const slotItems = useMemo(() => {
+    const rawItems = slotsQuery.data?.items ?? [];
+    const seen = new Set<string>();
+    const deduped: Slot[] = [];
+    for (const slot of rawItems) {
+      const key = `${slot.fieldId}__${slot.startTime}__${slot.endTime}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push(slot);
+    }
+    return deduped;
+  }, [slotsQuery.data?.items]);
   const timelineTimes = useMemo(() => buildTimelineLabels(), []);
 
   useFocusEffect(
@@ -96,8 +109,8 @@ export default function ScheduleBookingScreen() {
   );
 
   const selectedSorted = useMemo(
-    () => slotsFromBoundarySelection(slotItems, selection, selectedDate),
-    [slotItems, selection, selectedDate]
+    () => slotsFromBoundarySelection(slotItems, selection, selectedDate, timelineTimes),
+    [slotItems, selection, selectedDate, timelineTimes]
   );
 
   const firstSel = selectedSorted[0];
@@ -111,22 +124,23 @@ export default function ScheduleBookingScreen() {
     return pitchFormat === "7v7" ? ["Sân 7A", "Sân 7B", "Sân 7C"] : ["Sân 5A", "Sân 5B", "Sân 5C"];
   }, [slotItems, pitchFormat]);
 
-  const boundaryMap = useMemo(() => {
-    const map = new Map<string, Set<string>>();
+  const busyRanges: SlotBusyRange[] = slotsQuery.data?.busyRanges ?? [];
+  const availableCellKeys = useMemo(() => {
+    const keys = new Set<string>();
     for (const slot of slotItems) {
-      for (const label of [slotGridRowKey(slot.startTime, selectedDate), slotGridRowKey(slot.endTime, selectedDate)]) {
-        if (!label) {
-          continue;
-        }
-        const set = map.get(slot.fieldName) ?? new Set<string>();
-        set.add(label);
-        map.set(slot.fieldName, set);
+      const startLabel = slotGridRowKey(slot.startTime, selectedDate);
+      const endLabel = slotGridRowKey(slot.endTime, selectedDate);
+      const startIdx = startLabel ? timelineTimes.indexOf(startLabel) : -1;
+      const endIdx = endLabel ? timelineTimes.indexOf(endLabel) : -1;
+      if (startIdx === -1 || endIdx === -1) {
+        continue;
+      }
+      for (let i = startIdx; i < endIdx; i += 1) {
+        keys.add(`${slot.fieldName}__${timelineTimes[i]}`);
       }
     }
-    return map;
-  }, [slotItems, selectedDate]);
-
-  const busyRanges: SlotBusyRange[] = slotsQuery.data?.busyRanges ?? [];
+    return keys;
+  }, [slotItems, selectedDate, timelineTimes]);
 
   const activeBoundaryKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -255,8 +269,7 @@ export default function ScheduleBookingScreen() {
                         selectedDate,
                         busyRanges
                       );
-                      const isBoundaryFree = boundaryMap.get(fieldName)?.has(time) ?? false;
-                      const isAvailable = !overlapsBookedSlice && isBoundaryFree;
+                      const isAvailable = availableCellKeys.has(cellKey) && !overlapsBookedSlice;
                       return (
                         <Pressable
                           key={`${fieldName}-${time}`}
@@ -423,29 +436,39 @@ function normalizeBoundarySelection(
   fieldName: string,
   startLabel: string,
   endLabel: string,
-  gridDateYmd: string
+  timelineTimes: string[]
 ): BoundarySelection {
-  return boundaryLabelMs(gridDateYmd, startLabel) <= boundaryLabelMs(gridDateYmd, endLabel)
-    ? { fieldName, startLabel, endLabel }
-    : { fieldName, startLabel: endLabel, endLabel: startLabel };
+  const startIdx = timelineTimes.indexOf(startLabel);
+  const endIdx = timelineTimes.indexOf(endLabel);
+  if (startIdx === -1 || endIdx === -1) {
+    return { fieldName, startLabel, endLabel };
+  }
+  return startIdx <= endIdx ? { fieldName, startLabel, endLabel } : { fieldName, startLabel: endLabel, endLabel: startLabel };
 }
 
 function slotsFromBoundarySelection(
   items: Slot[],
   selection: BoundarySelection | null,
-  gridDateYmd: string
+  gridDateYmd: string,
+  timelineTimes: string[]
 ): Slot[] {
   if (!selection) {
     return [];
   }
 
-  const tStart = boundaryLabelMs(gridDateYmd, selection.startLabel);
-  const tEndExclusive = boundaryLabelMs(gridDateYmd, selection.endLabel);
+  const normalized = normalizeBoundarySelection(
+    selection.fieldName,
+    selection.startLabel,
+    selection.endLabel,
+    timelineTimes
+  );
+  const tStart = boundaryLabelMs(gridDateYmd, normalized.startLabel);
+  const tEndExclusive = boundaryLabelMs(gridDateYmd, normalized.endLabel);
   if (!(tEndExclusive > tStart)) {
     return [];
   }
 
-  return pickSlotsInHalfOpen(items, selection.fieldName, tStart, tEndExclusive) ?? [];
+  return pickSlotsInHalfOpen(items, normalized.fieldName, tStart, tEndExclusive) ?? [];
 }
 
 /**
@@ -468,8 +491,8 @@ function applyBoundaryTap(
       return null;
     }
 
-    const candidate = normalizeBoundarySelection(fieldName, previous.startLabel, timeLabel, gridDateYmd);
-    return slotsFromBoundarySelection(items, candidate, gridDateYmd).length > 0
+    const candidate = normalizeBoundarySelection(fieldName, previous.startLabel, timeLabel, timelineTimes);
+    return slotsFromBoundarySelection(items, candidate, gridDateYmd, timelineTimes).length > 0
       ? candidate
       : { fieldName, startLabel: timeLabel, endLabel: timeLabel };
   }
@@ -503,9 +526,9 @@ function applyBoundaryTap(
     candidate.fieldName,
     candidate.startLabel,
     candidate.endLabel,
-    gridDateYmd
+    timelineTimes
   );
-  return slotsFromBoundarySelection(items, normalized, gridDateYmd).length > 0
+  return slotsFromBoundarySelection(items, normalized, gridDateYmd, timelineTimes).length > 0
     ? normalized
     : { fieldName, startLabel: timeLabel, endLabel: timeLabel };
 }
@@ -667,4 +690,3 @@ function buildTimelineLabels() {
   }
   return labels;
 }
-

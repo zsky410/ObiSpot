@@ -97,6 +97,32 @@ export type AdminSlot = {
   endTime: string;
   status: "available" | "blocked" | "booked";
   bookingStatus?: "pending" | "confirmed" | null;
+  bookingGroupId?: string | null;
+};
+
+export type AdminSlotBookingDetail = {
+  booking: {
+    id: string;
+    bookingRowId: string;
+    status: "pending" | "confirmed";
+    createdAt: string;
+    note: string;
+    customer: {
+      id: string;
+      fullName: string;
+      phone: string;
+    };
+    slot: {
+      id: string;
+      startTime: string | null;
+      endTime: string | null;
+      totalPriceVnd: number;
+      slotCount: number;
+      fieldName: string;
+      venueName: string;
+      venueAddress: string;
+    };
+  };
 };
 
 export type Venue = {
@@ -163,6 +189,10 @@ export async function getAdminSlotsApi(token: string, date: string, venueId: str
 export async function getAdminFieldsApi(token: string, venueId: string) {
   const q = new URLSearchParams({ venueId });
   return apiRequest<{ items: Field[] }>(`/admin/fields?${q.toString()}`, { token });
+}
+
+export async function getAdminSlotBookingDetailApi(token: string, slotId: string) {
+  return apiRequest<AdminSlotBookingDetail>(`/admin/slots/${slotId}/booking`, { token });
 }
 
 export async function patchAdminSlotStatusApi(token: string, slotId: string, status: "available" | "blocked") {

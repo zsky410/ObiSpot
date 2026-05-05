@@ -82,16 +82,26 @@ export async function ensureVenueDailySlots(
   }
 
   const fieldIds = fields.map((f) => f.id);
-  const dayStart = localTimestamp(date, "00:00");
-  const dayEnd = localTimestamp(date, "23:59");
+  const rangeStart = localTimestamp(date, dailyStart);
+  const rangeEnd = localTimestamp(date, dailyEnd); // exclusive
   const { data: existing, error: existingError } = await supabaseAdminClient
     .from("time_slots")
     .select("field_id, start_time, end_time")
     .in("field_id", fieldIds)
-    .gte("start_time", dayStart)
-    .lte("start_time", dayEnd);
+    .gte("start_time", rangeStart)
+    .lt("start_time", rangeEnd);
 
   if (existingError) {
+    return { createdCount: 0 };
+  }
+
+  const expectedStartCount = Math.floor((endMinutes - startMinutes) / slotMinutes);
+  const countsByField = new Map(fieldIds.map((id) => [id, 0]));
+  for (const slot of existing || []) {
+    countsByField.set(slot.field_id, (countsByField.get(slot.field_id) || 0) + 1);
+  }
+  const hasAllExpectedForAllFields = fieldIds.every((id) => (countsByField.get(id) || 0) >= expectedStartCount);
+  if (hasAllExpectedForAllFields) {
     return { createdCount: 0 };
   }
 

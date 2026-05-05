@@ -1,9 +1,13 @@
 import * as SecureStore from "expo-secure-store";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Platform } from "react-native";
 import { loginApi, refreshSessionApi, type AuthSessionPayload } from "../lib/api";
 
 const AUTH_STORAGE_KEY = "obispot_auth_session";
+const AUTH_STORAGE_FALLBACK_KEY = "obispot_auth_session_fallback";
 const TOKEN_REFRESH_SKEW_MS = 60_000;
+let volatileFallbackSession: string | null = null;
 
 type AuthUser = {
   id: string;
@@ -59,16 +63,105 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     bootstrapped: false
   });
   const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
+  const sessionRef = useRef<StoredAuthSession | null>(null);
 
-  async function persistSession(session: StoredAuthSession | null) {
-    if (!session) {
-      await SecureStore.deleteItemAsync(AUTH_STORAGE_KEY);
+  async function removeFallbackStorage() {
+    if (Platform.OS === "web") {
+      if (typeof localStorage !== "undefined") {
+        localStorage.removeItem(AUTH_STORAGE_FALLBACK_KEY);
+      }
+      volatileFallbackSession = null;
       return;
     }
-    await SecureStore.setItemAsync(AUTH_STORAGE_KEY, JSON.stringify(session));
+    try {
+      await AsyncStorage.removeItem(AUTH_STORAGE_FALLBACK_KEY);
+      volatileFallbackSession = null;
+    } catch {
+      volatileFallbackSession = null;
+    }
+  }
+
+  async function setFallbackStorage(rawValue: string) {
+    if (Platform.OS === "web") {
+      if (typeof localStorage !== "undefined") {
+        localStorage.setItem(AUTH_STORAGE_FALLBACK_KEY, rawValue);
+      } else {
+        volatileFallbackSession = rawValue;
+      }
+      return;
+    }
+    try {
+      await AsyncStorage.setItem(AUTH_STORAGE_FALLBACK_KEY, rawValue);
+    } catch {
+      volatileFallbackSession = rawValue;
+    }
+  }
+
+  async function getFallbackStorage() {
+    if (Platform.OS === "web") {
+      if (typeof localStorage !== "undefined") {
+        return localStorage.getItem(AUTH_STORAGE_FALLBACK_KEY);
+      }
+      return volatileFallbackSession;
+    }
+    try {
+      const value = await AsyncStorage.getItem(AUTH_STORAGE_FALLBACK_KEY);
+      if (value) {
+        return value;
+      }
+    } catch {
+      // AsyncStorage native module unavailable -> dùng fallback in-memory.
+    }
+    return volatileFallbackSession;
+  }
+
+  async function writeSessionToStorage(rawValue: string | null) {
+    if (rawValue == null) {
+      await Promise.allSettled([
+        removeFallbackStorage(),
+        SecureStore.deleteItemAsync(AUTH_STORAGE_KEY)
+      ]);
+      return;
+    }
+
+    volatileFallbackSession = rawValue;
+    try {
+      await setFallbackStorage(rawValue);
+    } catch {
+      volatileFallbackSession = rawValue;
+    }
+
+    try {
+      await SecureStore.setItemAsync(AUTH_STORAGE_KEY, rawValue);
+    } catch {
+      // SecureStore là lớp bổ sung. AsyncStorage vẫn giữ phiên để app không tự logout sau reload.
+    }
+  }
+
+  async function readSessionFromStorage() {
+    const fallbackValue = await getFallbackStorage();
+    if (fallbackValue) {
+      return fallbackValue;
+    }
+
+    try {
+      const secureValue = await SecureStore.getItemAsync(AUTH_STORAGE_KEY);
+      if (secureValue) {
+        await setFallbackStorage(secureValue);
+        return secureValue;
+      }
+    } catch {
+      // Bỏ qua lỗi SecureStore và thử fallback.
+    }
+    return null;
+  }
+
+  async function persistSession(session: StoredAuthSession | null) {
+    await writeSessionToStorage(session ? JSON.stringify(session) : null);
   }
 
   function setSessionState(session: StoredAuthSession | null, bootstrapped = true) {
+    sessionRef.current = session;
     setState({
       token: session?.token ?? null,
       refreshToken: session?.refreshToken ?? null,
@@ -94,7 +187,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let mounted = true;
     async function restoreSession() {
       try {
-        const raw = await SecureStore.getItemAsync(AUTH_STORAGE_KEY);
+        const raw = await readSessionFromStorage();
         if (!mounted) {
           return;
         }
@@ -106,7 +199,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
         const parsed = JSON.parse(raw) as Partial<StoredAuthSession>;
         if (!parsed.token || !parsed.refreshToken || !parsed.user) {
-          await SecureStore.deleteItemAsync(AUTH_STORAGE_KEY);
+          await persistSession(null);
           if (mounted) {
             setSessionState(null);
           }
@@ -120,8 +213,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           user: parsed.user
         };
 
+        setSessionState(storedSession);
         if (!shouldRefreshToken(storedSession.expiresAt)) {
-          setSessionState(storedSession);
           return;
         }
 
@@ -136,10 +229,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             setSessionState(nextSession);
           }
         } catch {
-          await SecureStore.deleteItemAsync(AUTH_STORAGE_KEY);
-          if (mounted) {
-            setSessionState(null);
-          }
+          // Giữ phiên đã lưu để app vẫn vào được; token sẽ được refresh lại khi user thao tác tiếp.
         }
       } catch {
         if (mounted) {
@@ -166,16 +256,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         await replaceSession(null);
       },
       async getValidAccessToken() {
-        if (!state.token || !state.refreshToken) {
+        const currentSession = sessionRef.current;
+        if (!currentSession?.token || !currentSession.refreshToken) {
           return null;
         }
 
-        if (!shouldRefreshToken(state.expiresAt)) {
-          return state.token;
+        if (!shouldRefreshToken(currentSession.expiresAt)) {
+          return currentSession.token;
         }
 
         if (!refreshPromiseRef.current) {
-          refreshPromiseRef.current = refreshWithToken(state.refreshToken)
+          refreshPromiseRef.current = refreshWithToken(currentSession.refreshToken)
             .catch(async () => {
               await replaceSession(null);
               return null;
