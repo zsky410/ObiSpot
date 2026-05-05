@@ -307,16 +307,16 @@ adminRouter.get(
         dailyEnd: "23:00"
       });
     }
-    const dayStart = new Date(`${date}T00:00:00+07:00`).toISOString();
-    const dayEndExclusive = new Date(new Date(`${date}T00:00:00+07:00`).getTime() + 24 * 60 * 60 * 1000).toISOString();
+    const rangeStart = new Date(`${date}T05:00:00+07:00`).toISOString();
+    const rangeEndExclusive = new Date(`${date}T23:00:00+07:00`).toISOString();
 
     const { data, error } = await selectAllPages(() =>
       supabaseAdminClient
         .from("time_slots")
         .select("id, field_id, start_time, end_time, status, fields:field_id!inner(name, venue_id)")
         .eq("fields.venue_id", venueId)
-        .lt("start_time", dayEndExclusive)
-        .gt("end_time", dayStart)
+        .gte("start_time", rangeStart)
+        .lt("start_time", rangeEndExclusive)
         .order("field_id", { ascending: true })
         .order("start_time", { ascending: true })
         .order("id", { ascending: true })
@@ -336,7 +336,7 @@ adminRouter.get(
         const batch = slotIds.slice(i, i + chunkSize);
         const { data: batchRows, error: bookingError } = await supabaseAdminClient
           .from("bookings")
-          .select("slot_id, status")
+          .select("id, order_id, slot_id, status")
           .in("slot_id", batch)
           .in("status", ["pending", "confirmed"]);
         if (bookingError) {
@@ -344,20 +344,23 @@ adminRouter.get(
         }
         bookingRows.push(...(batchRows || []));
       }
-      bookedBySlotId = new Map(bookingRows.map((row) => [row.slot_id, row.status]));
+      bookedBySlotId = new Map(
+        bookingRows.map((row) => [row.slot_id, { status: row.status, bookingGroupId: row.order_id || row.id }])
+      );
     }
 
     const items = slots.map((slot) => {
       const field = Array.isArray(slot.fields) ? slot.fields[0] : slot.fields;
-      const bookedStatus = bookedBySlotId.get(slot.id);
+      const bookedInfo = bookedBySlotId.get(slot.id);
       return {
         id: slot.id,
         fieldId: slot.field_id,
         fieldName: field?.name || "",
         startTime: slot.start_time,
         endTime: slot.end_time,
-        status: bookedStatus ? "booked" : slot.status,
-        bookingStatus: bookedStatus || null
+        status: bookedInfo ? "booked" : slot.status,
+        bookingStatus: bookedInfo?.status || null,
+        bookingGroupId: bookedInfo?.bookingGroupId || null
       };
     });
 
@@ -615,6 +618,108 @@ adminRouter.patch(
       updatedCount: (data || []).length,
       slotIds: (data || []).map((row) => row.id),
       status
+    });
+  })
+);
+
+adminRouter.get(
+  "/slots/:slotId/booking",
+  validateParams(slotParamsSchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid slot booking detail request",
+        { fields: req.validationError }
+      );
+    }
+
+    const { slotId } = req.validatedParams;
+    const { data: matchedRows, error: matchedError } = await supabaseAdminClient
+      .from("bookings")
+      .select(
+        "id, order_id, status, note, created_at, user_id, profiles:user_id(full_name, phone), time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venues:venue_id(name, address)))"
+      )
+      .eq("slot_id", slotId)
+      .in("status", ["pending", "confirmed"])
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (matchedError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch slot booking detail");
+    }
+
+    const matched = matchedRows?.[0];
+    if (!matched) {
+      return sendError(res, 404, ERROR_CODES.bookingNotFound, "Slot này chưa có đơn đặt hợp lệ");
+    }
+
+    const orderId = matched.order_id || matched.id;
+    const orderFilter = matched.order_id ? { column: "order_id", value: matched.order_id } : { column: "id", value: matched.id };
+    const { data: orderRows, error: orderError } = await supabaseAdminClient
+      .from("bookings")
+      .select(
+        "id, order_id, status, note, created_at, user_id, profiles:user_id(full_name, phone), time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venues:venue_id(name, address)))"
+      )
+      .eq(orderFilter.column, orderFilter.value)
+      .in("status", ["pending", "confirmed"])
+      .order("created_at", { ascending: true });
+
+    if (orderError || !orderRows || orderRows.length === 0) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to aggregate booking detail");
+    }
+
+    let bookingStartTime = null;
+    let bookingEndTime = null;
+    let totalPriceVnd = 0;
+
+    for (const row of orderRows) {
+      const slot = Array.isArray(row.time_slots) ? row.time_slots[0] : row.time_slots;
+      const slotStart = slot?.start_time || null;
+      const slotEnd = slot?.end_time || null;
+
+      if (slotStart && (!bookingStartTime || new Date(slotStart).getTime() < new Date(bookingStartTime).getTime())) {
+        bookingStartTime = slotStart;
+      }
+      if (slotEnd && (!bookingEndTime || new Date(slotEnd).getTime() > new Date(bookingEndTime).getTime())) {
+        bookingEndTime = slotEnd;
+      }
+      totalPriceVnd += Number(slot?.price_vnd ?? 0);
+    }
+
+    const primaryRow = orderRows[0];
+    const profile = Array.isArray(primaryRow.profiles) ? primaryRow.profiles[0] : primaryRow.profiles;
+    const primarySlot = Array.isArray(primaryRow.time_slots) ? primaryRow.time_slots[0] : primaryRow.time_slots;
+    const field = Array.isArray(primarySlot?.fields) ? primarySlot.fields[0] : primarySlot?.fields;
+    const venue = Array.isArray(field?.venues) ? field.venues[0] : field?.venues;
+    const aggregatedStatus = orderRows.some((row) => row.status === "pending") ? "pending" : "confirmed";
+    const note = orderRows.find((row) => row.note)?.note || "";
+
+    return res.status(200).json({
+      booking: {
+        id: orderId,
+        bookingRowId: matched.id,
+        status: aggregatedStatus,
+        createdAt: primaryRow.created_at,
+        note,
+        customer: {
+          id: primaryRow.user_id,
+          fullName: profile?.full_name || "",
+          phone: profile?.phone || ""
+        },
+        slot: {
+          id: orderId,
+          startTime: bookingStartTime,
+          endTime: bookingEndTime,
+          totalPriceVnd,
+          slotCount: orderRows.length,
+          fieldName: field?.name || "",
+          venueName: venue?.name || "",
+          venueAddress: venue?.address || ""
+        }
+      }
     });
   })
 );

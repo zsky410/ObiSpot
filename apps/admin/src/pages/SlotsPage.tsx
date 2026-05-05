@@ -2,31 +2,48 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import {
   type AdminSlot,
+  type AdminSlotBookingDetail,
   ApiRequestError,
   getAdminFieldsApi,
+  getAdminSlotBookingDetailApi,
   getAdminSlotsApi,
   getVenuesApi,
   patchAdminSlotsBulkStatusApi
 } from "../lib/api";
 import { useAuth } from "../store/auth";
 
+type TimelineCellInfo = {
+  status: "none" | "available" | "blocked" | "booked";
+  availableIds: string[];
+  blockedIds: string[];
+  bookedIds: string[];
+  bookingGroupIds: string[];
+};
+
+type BookedTimelineBlock = {
+  fieldId: string;
+  bookingGroupId: string;
+  slotId: string;
+  startTime: string;
+  endTime: string;
+  startLabel: string;
+  rowSpan: number;
+};
+
 const SLOT_ACTION_COPY: Record<
   "block" | "unblock" | "reserve",
-  { label: string; description: string; cta: string }
+  { label: string; cta: string }
 > = {
   block: {
     label: "Khóa slot",
-    description: "Chuyển các slot đang mở sang trạng thái khóa để dừng nhận đặt mới.",
     cta: "Khóa các ô đã chọn"
   },
   unblock: {
     label: "Mở slot",
-    description: "Mở lại các slot đang khóa để tiếp tục cho phép đặt sân.",
     cta: "Mở lại các ô đã chọn"
   },
   reserve: {
     label: "Đặt giữ slot",
-    description: "Giữ chỗ thủ công bằng cách khóa nhanh các slot còn trống.",
     cta: "Đặt giữ các ô đã chọn"
   }
 };
@@ -39,6 +56,7 @@ export function SlotsPage() {
   const [fieldFilter, setFieldFilter] = useState("all");
   const [actionMode, setActionMode] = useState<"block" | "unblock" | "reserve">("block");
   const [selectedCellKeys, setSelectedCellKeys] = useState<string[]>([]);
+  const [activeBookedSlotId, setActiveBookedSlotId] = useState<string | null>(null);
 
   const venuesQuery = useQuery({
     queryKey: ["venues"],
@@ -64,13 +82,18 @@ export function SlotsPage() {
       return getAdminFieldsApi(token, expandedVenueId);
     }
   });
+  const bookedSlotDetailQuery = useQuery({
+    queryKey: ["admin-slot-booking-detail", activeBookedSlotId],
+    enabled: !!activeBookedSlotId,
+    queryFn: async () => {
+      const token = await getValidAccessToken();
+      if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
+      return getAdminSlotBookingDetailApi(token, activeBookedSlotId as string);
+    }
+  });
 
   const fields = useMemo(() => fieldsQuery.data?.items || [], [fieldsQuery.data?.items]);
   const venues = venuesQuery.data?.items || [];
-  const selectedVenue = useMemo(
-    () => venues.find((venue) => venue.id === expandedVenueId) || null,
-    [venues, expandedVenueId]
-  );
   const actionCopy = SLOT_ACTION_COPY[actionMode];
   const dateLabel = useMemo(() => formatDateLabel(date), [date]);
   const todayValue = useMemo(() => getVietnamDateInputValue(new Date()), []);
@@ -111,33 +134,45 @@ export function SlotsPage() {
   }, [fields, fieldFilter]);
   const timelineLabels = useMemo(() => buildTimelineLabels("05:00", "22:30"), []);
   const slotCellInfoMap = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        status: "none" | "available" | "blocked" | "booked";
-        availableIds: string[];
-        blockedIds: string[];
-        bookedIds: string[];
-      }
-    >();
-    const labelsWithMs = timelineLabels.map((label) => ({
-      label,
-      startMs: boundaryLabelMs(date, label),
-      endMs: boundaryLabelMs(date, label) + 30 * 60 * 1000
-    }));
+    const map = new Map<string, TimelineCellInfo>();
+
+    // Mỗi ô timeline là 1 lát 30 phút, có mốc đều nhau.
+    // Thay vì duyệt tất cả nhãn cho mỗi slot (O(n*m)), ta tính chỉ số lát bị slot phủ lên.
+    const stepMs = 30 * 60 * 1000;
+    const timelineStartMs = boundaryLabelMs(date, timelineLabels[0]);
+    const timelineCount = timelineLabels.length;
+
     for (const slot of slotsQuery.data?.items || []) {
       const slotStartMs = new Date(slot.startTime).getTime();
       const slotEndMs = new Date(slot.endTime).getTime();
-      for (const period of labelsWithMs) {
-        if (!(period.startMs < slotEndMs && slotStartMs < period.endMs)) continue;
-        const key = `${slot.fieldId}__${period.label}`;
+
+      // i sao cho: labelMs < slotEnd && slotStart < labelMs+step
+      // labelMs = timelineStartMs + i*step
+      const iStart = Math.floor((slotStartMs - timelineStartMs) / stepMs);
+      const iEnd = Math.ceil((slotEndMs - timelineStartMs) / stepMs) - 1;
+
+      const from = Math.max(0, iStart);
+      const to = Math.min(timelineCount - 1, iEnd);
+      if (from > to) continue;
+
+      for (let i = from; i <= to; i += 1) {
+        const label = timelineLabels[i];
+        const labelStartMs = timelineStartMs + i * stepMs;
+        const labelEndMs = labelStartMs + stepMs;
+        if (!(labelStartMs < slotEndMs && slotStartMs < labelEndMs)) continue; // chốt lại off-by-one
+
+        const key = `${slot.fieldId}__${label}`;
         const current = map.get(key) || {
           status: "none" as const,
           availableIds: [],
           blockedIds: [],
-          bookedIds: []
+          bookedIds: [],
+          bookingGroupIds: []
         };
-        if (slot.status === "booked") current.bookedIds.push(slot.id);
+        if (slot.status === "booked") {
+          current.bookedIds.push(slot.id);
+          if (slot.bookingGroupId) current.bookingGroupIds.push(slot.bookingGroupId);
+        }
         else if (slot.status === "blocked") current.blockedIds.push(slot.id);
         else current.availableIds.push(slot.id);
         map.set(key, current);
@@ -155,43 +190,101 @@ export function SlotsPage() {
     }
     return map;
   }, [slotsQuery.data?.items, timelineLabels, date]);
-  const visibleSlotSummary = useMemo(() => {
-    const visibleFieldIds = new Set(visibleFields.map((field) => field.id));
-    const summary = {
-      total: 0,
-      available: 0,
-      blocked: 0,
-      booked: 0
-    };
+  const bookedBlockLayout = useMemo(() => {
+    const byStartKey = new Map<string, BookedTimelineBlock>();
+    const coveredCellKeys = new Set<string>();
+    const stepMs = 30 * 60 * 1000;
+    const timelineStartMs = boundaryLabelMs(date, timelineLabels[0]);
+    const bookedSlotsByGroup = new Map<string, AdminSlot[]>();
+
     for (const slot of slotsQuery.data?.items || []) {
-      if (!visibleFieldIds.has(slot.fieldId)) continue;
-      summary.total += 1;
-      if (slot.status === "available") summary.available += 1;
-      else if (slot.status === "blocked") summary.blocked += 1;
-      else summary.booked += 1;
+      if (slot.status !== "booked") continue;
+      const bookingGroupId = slot.bookingGroupId || slot.id;
+      const key = `${slot.fieldId}__${bookingGroupId}`;
+      const current = bookedSlotsByGroup.get(key) || [];
+      current.push(slot);
+      bookedSlotsByGroup.set(key, current);
     }
-    return summary;
-  }, [slotsQuery.data?.items, visibleFields]);
-  const missingSlotCount = useMemo(() => {
-    if (!visibleFields.length) return 0;
-    const expectedCount = visibleFields.length * timelineLabels.length;
-    return Math.max(0, expectedCount - visibleSlotSummary.total);
-  }, [timelineLabels.length, visibleFields.length, visibleSlotSummary.total]);
+
+    for (const [groupKey, groupSlots] of bookedSlotsByGroup.entries()) {
+      const [fieldId, bookingGroupId] = groupKey.split("__");
+      const sortedSlots = [...groupSlots].sort((a, b) => slotMs(a.startTime) - slotMs(b.startTime));
+      let segment: AdminSlot[] = [];
+      let segmentEndMs = 0;
+
+      const commitSegment = () => {
+        if (!segment.length) return;
+        const segmentStartMs = slotMs(segment[0].startTime);
+        const segmentEndTime = segment.reduce(
+          (latest, slot) => (slotMs(slot.endTime) > slotMs(latest) ? slot.endTime : latest),
+          segment[0].endTime
+        );
+        const segmentEndMsValue = slotMs(segmentEndTime);
+        const startIndex = Math.max(0, Math.floor((segmentStartMs - timelineStartMs) / stepMs));
+        const endIndexExclusive = Math.min(timelineLabels.length, Math.ceil((segmentEndMsValue - timelineStartMs) / stepMs));
+        const rowSpan = endIndexExclusive - startIndex;
+        if (rowSpan <= 0) {
+          segment = [];
+          segmentEndMs = 0;
+          return;
+        }
+        const startLabel = timelineLabels[startIndex];
+        byStartKey.set(`${fieldId}__${startLabel}`, {
+          fieldId,
+          bookingGroupId,
+          slotId: segment[0].id,
+          startTime: segment[0].startTime,
+          endTime: segmentEndTime,
+          startLabel,
+          rowSpan
+        });
+        for (let i = startIndex + 1; i < endIndexExclusive; i += 1) {
+          coveredCellKeys.add(`${fieldId}__${timelineLabels[i]}`);
+        }
+        segment = [];
+        segmentEndMs = 0;
+      };
+
+      for (const slot of sortedSlots) {
+        if (!segment.length) {
+          segment = [slot];
+          segmentEndMs = slotMs(slot.endTime);
+          continue;
+        }
+        const nextStartMs = slotMs(slot.startTime);
+        if (nextStartMs > segmentEndMs) {
+          commitSegment();
+          segment = [slot];
+          segmentEndMs = slotMs(slot.endTime);
+          continue;
+        }
+        segment.push(slot);
+        segmentEndMs = Math.max(segmentEndMs, slotMs(slot.endTime));
+      }
+
+      commitSegment();
+    }
+
+    return { byStartKey, coveredCellKeys };
+  }, [slotsQuery.data?.items, timelineLabels, date]);
 
   function handleDateChange(nextDate: string) {
     setDate(nextDate);
     setSelectedCellKeys([]);
+    setActiveBookedSlotId(null);
   }
 
   function handleVenueChange(nextVenueId: string) {
     setExpandedVenueId(nextVenueId);
     setFieldFilter("all");
     setSelectedCellKeys([]);
+    setActiveBookedSlotId(null);
   }
 
   function handleFieldFilterChange(nextFieldId: string) {
     setFieldFilter(nextFieldId);
     setSelectedCellKeys([]);
+    setActiveBookedSlotId(null);
   }
 
   function handleCellAction(cellKey: string, cellStatus: "none" | "available" | "blocked" | "booked") {
@@ -200,6 +293,30 @@ export function SlotsPage() {
       prev.includes(cellKey) ? prev.filter((key) => key !== cellKey) : [...prev, cellKey]
     );
   }
+
+  function handleTimelineCellClick(
+    cellKey: string,
+    cellInfo:
+      | {
+          status: "none" | "available" | "blocked" | "booked";
+          availableIds: string[];
+          blockedIds: string[];
+          bookedIds: string[];
+        }
+      | undefined,
+    bookedSlotId?: string
+  ) {
+    if (!cellInfo || cellInfo.status === "none") return;
+    if (cellInfo.status === "booked") {
+      if (bookedSlotId || cellInfo.bookedIds.length > 0) {
+        setActiveBookedSlotId(bookedSlotId || cellInfo.bookedIds[0]);
+      }
+      return;
+    }
+    handleCellAction(cellKey, cellInfo.status);
+  }
+
+  const activeBooking = bookedSlotDetailQuery.data?.booking as AdminSlotBookingDetail["booking"] | undefined;
 
   function applyActionOnSelected() {
     if (selectedCellKeys.length === 0) {
@@ -253,27 +370,10 @@ export function SlotsPage() {
 
   return (
     <section className="slot-page">
-      <div className="slot-page-head">
-        <div>
-          <h3>Điều phối khung giờ</h3>
-          <p className="muted">Chọn ngày, chi nhánh và thao tác trực tiếp trên timeline.</p>
-        </div>
-        <div className="slot-head-summary">
-          <span className="slot-summary-pill">{dateLabel}</span>
-          <span className="slot-summary-pill">{selectedVenue ? selectedVenue.name : `${venues.length} chi nhánh`}</span>
-          <span className="slot-summary-pill active">{selectedCellKeys.length} ô đã chọn</span>
-        </div>
-      </div>
-
       <div className="card slot-control-card">
         <div className="slot-control-top">
           <div>
             <h4>Bộ lọc và thao tác</h4>
-            <p className="muted">
-              {selectedVenue
-                ? `${selectedVenue.name}${selectedVenue.address ? ` · ${selectedVenue.address}` : ""}`
-                : "Chọn một chi nhánh để xem timeline và thao tác theo từng sân."}
-            </p>
           </div>
           <div className="slot-control-status">
             <span className={`slot-action-pill slot-action-pill-${actionMode}`}>{actionCopy.label}</span>
@@ -309,7 +409,6 @@ export function SlotsPage() {
                 </option>
               ))}
             </select>
-            <small>{selectedVenue ? selectedVenue.address : "Đồng bộ với danh sách chi nhánh phía dưới."}</small>
           </label>
 
           <label className="input-col slot-input-card">
@@ -328,11 +427,6 @@ export function SlotsPage() {
                 </option>
               ))}
             </select>
-            <small>
-              {expandedVenueId
-                ? `${visibleFields.length}/${fields.length} sân đang hiển thị trong timeline.`
-                : "Chọn chi nhánh trước khi lọc theo sân."}
-            </small>
           </label>
 
           <label className="input-col slot-input-card">
@@ -342,7 +436,6 @@ export function SlotsPage() {
               <option value="unblock">Mở slot</option>
               <option value="reserve">Đặt giữ slot</option>
             </select>
-            <small>{actionCopy.description}</small>
           </label>
         </div>
 
@@ -363,13 +456,6 @@ export function SlotsPage() {
               Ngày mai
             </button>
           </div>
-          <div className="slot-control-actions">
-            {expandedVenueId ? (
-              <span className="slot-helper-text">Hiển thị {visibleFields.length} sân trong timeline.</span>
-            ) : (
-              <span className="slot-helper-text">Chọn chi nhánh để bắt đầu.</span>
-            )}
-          </div>
           <button
             className="btn slot-apply-btn"
             onClick={applyActionOnSelected}
@@ -381,11 +467,6 @@ export function SlotsPage() {
       </div>
 
       <div className="slot-feedback-stack">
-        {!expandedVenueId && venues.length ? (
-          <div className="slot-feedback slot-feedback-muted">
-            Chọn chi nhánh ở bộ lọc phía trên hoặc mở một card bên dưới để xem timeline chi tiết.
-          </div>
-        ) : null}
         {venuesQuery.isError ? (
           <div className="slot-feedback slot-feedback-error">Không tải được danh sách chi nhánh.</div>
         ) : null}
@@ -435,13 +516,6 @@ export function SlotsPage() {
                       <div className="slot-empty-card">Chi nhánh này chưa có sân để hiển thị timeline.</div>
                     ) : (
                       <>
-                        <div className="slot-venue-summary">
-                          <span className="slot-stat-chip">{visibleFields.length} sân</span>
-                          <span className="slot-stat-chip">{visibleSlotSummary.available} mở</span>
-                          <span className="slot-stat-chip">{visibleSlotSummary.blocked} khóa</span>
-                          <span className="slot-stat-chip">{visibleSlotSummary.booked} đã đặt</span>
-                        </div>
-
                         <div className="slot-timeline-legend">
                           <span>
                             <i className="legend-dot legend-none" /> Chưa tạo slot
@@ -460,12 +534,6 @@ export function SlotsPage() {
                           </span>
                         </div>
 
-                        {missingSlotCount > 0 ? (
-                          <p className="slot-empty-note muted">
-                            Có {missingSlotCount} ô trong timeline chưa được tạo slot, nên sẽ không thể chọn trực tiếp.
-                          </p>
-                        ) : null}
-
                         {visibleFields.length ? (
                           <div className="slot-timeline-wrap">
                             <table className="slot-timeline-table">
@@ -483,10 +551,15 @@ export function SlotsPage() {
                                     <td className="slot-time-col">{label}</td>
                                     {visibleFields.map((field) => {
                                       const cellKey = `${field.id}__${label}`;
+                                      if (bookedBlockLayout.coveredCellKeys.has(cellKey)) {
+                                        return null;
+                                      }
                                       const cellInfo = slotCellInfoMap.get(cellKey);
+                                      const bookedBlock = bookedBlockLayout.byStartKey.get(cellKey);
                                       const isSelected = selectedCellKeys.includes(cellKey);
-                                      const cellStatusClass =
-                                        !cellInfo || cellInfo.status === "none"
+                                      const cellStatusClass = bookedBlock
+                                        ? "slot-cell-booked slot-cell-booked-merged"
+                                        : !cellInfo || cellInfo.status === "none"
                                           ? "slot-cell-none"
                                           : cellInfo.status === "blocked"
                                             ? "slot-cell-blocked"
@@ -494,28 +567,44 @@ export function SlotsPage() {
                                               ? "slot-cell-booked"
                                               : "slot-cell-available";
 
+                                      if (bookedBlock) {
+                                        return (
+                                          <td
+                                            key={`${field.id}-${label}`}
+                                            rowSpan={bookedBlock.rowSpan}
+                                            className="slot-booked-merged-cell"
+                                          >
+                                            <button
+                                              className={`slot-cell ${cellStatusClass}`}
+                                              disabled={toggleMutation.isPending}
+                                              onClick={() => handleTimelineCellClick(cellKey, cellInfo, bookedBlock.slotId)}
+                                              title={`${field.name} · Đơn ${formatTimeRange(bookedBlock.startTime, bookedBlock.endTime)}`}
+                                            >
+                                              <span className="slot-booked-merged-content">
+                                                {bookedBlock.rowSpan >= 2 ? formatTimeRange(bookedBlock.startTime, bookedBlock.endTime) : ""}
+                                              </span>
+                                            </button>
+                                          </td>
+                                        );
+                                      }
+
                                       return (
                                         <td key={`${field.id}-${label}`}>
                                           <button
                                             className={`slot-cell ${cellStatusClass} ${isSelected ? "slot-cell-selected" : ""}`}
-                                            disabled={
-                                              !cellInfo ||
-                                              cellInfo.status === "none" ||
-                                              cellInfo.status === "booked" ||
-                                              toggleMutation.isPending
-                                            }
-                                            onClick={() => handleCellAction(cellKey, cellInfo?.status || "none")}
+                                            disabled={!cellInfo || cellInfo.status === "none" || toggleMutation.isPending}
+                                            onClick={() => handleTimelineCellClick(cellKey, cellInfo)}
                                             title={
                                               !cellInfo || cellInfo.status === "none"
                                                 ? "Không có slot"
                                                 : cellInfo.status === "booked"
-                                                  ? `${field.name} · Đã có đơn`
+                                                  ? `${field.name} · Xem chi tiết đơn đặt`
                                                   : cellInfo.status === "blocked"
                                                     ? `${field.name} · Slot đang khóa`
                                                     : `${field.name} · Slot đang mở`
                                             }
                                           >
-                                            &nbsp;
+                                            <span className="slot-cell-empty">&nbsp;</span>
                                           </button>
                                         </td>
                                       );
@@ -529,8 +618,8 @@ export function SlotsPage() {
                           <div className="slot-empty-card">Không có sân nào khớp với bộ lọc hiện tại.</div>
                         )}
 
-                        {!slotsQuery.isLoading && visibleSlotSummary.total === 0 ? (
-                          <p className="slot-empty-note muted">Ngày này chưa có slot. Hãy Generate cho sân cần mở lịch.</p>
+                        {!slotsQuery.isLoading && (slotsQuery.data?.items?.length || 0) === 0 ? (
+                          <p className="slot-empty-note muted">Ngày này chưa có slot.</p>
                         ) : null}
                       </>
                     )}
@@ -543,8 +632,129 @@ export function SlotsPage() {
       ) : (
         <p className="muted">Chưa có chi nhánh.</p>
       )}
+
+      {activeBookedSlotId ? (
+        <div className="slot-booking-modal-overlay" onClick={() => setActiveBookedSlotId(null)} role="presentation">
+          <div className="slot-booking-modal card" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+            <div className="slot-booking-modal-head">
+              <h4>Chi tiết đơn đặt sân</h4>
+              <button type="button" className="slot-booking-modal-close" onClick={() => setActiveBookedSlotId(null)}>
+                Đóng
+              </button>
+            </div>
+
+            {bookedSlotDetailQuery.isLoading ? (
+              <p className="muted">Đang tải thông tin đơn...</p>
+            ) : bookedSlotDetailQuery.isError ? (
+              <p className="slot-feedback slot-feedback-error">
+                {bookedSlotDetailQuery.error instanceof Error
+                  ? bookedSlotDetailQuery.error.message
+                  : "Không tải được thông tin đơn"}
+              </p>
+            ) : activeBooking ? (
+              <div className="slot-booking-detail-grid">
+                <div>
+                  <span>Mã đơn</span>
+                  <strong>{activeBooking.id}</strong>
+                </div>
+                <div>
+                  <span>Trạng thái</span>
+                  <strong>{activeBooking.status === "confirmed" ? "Đã xác nhận" : "Chờ xác nhận"}</strong>
+                </div>
+                <div>
+                  <span>Khách hàng</span>
+                  <strong>{activeBooking.customer.fullName || "Không rõ"}</strong>
+                </div>
+                <div>
+                  <span>Số điện thoại</span>
+                  <strong>{activeBooking.customer.phone || "Chưa cập nhật"}</strong>
+                </div>
+                <div>
+                  <span>Khung giờ</span>
+                  <strong>
+                    {formatTimeRange(activeBooking.slot.startTime, activeBooking.slot.endTime)}
+                  </strong>
+                </div>
+                <div>
+                  <span>Tổng tiền</span>
+                  <strong>{formatCurrency(activeBooking.slot.totalPriceVnd)}</strong>
+                </div>
+                <div>
+                  <span>Thời lượng</span>
+                  <strong>{formatBookingSpan(activeBooking.slot.slotCount, activeBooking.slot.startTime, activeBooking.slot.endTime)}</strong>
+                </div>
+                <div>
+                  <span>Sân</span>
+                  <strong>{activeBooking.slot.fieldName || "Không rõ"}</strong>
+                </div>
+                <div>
+                  <span>Chi nhánh</span>
+                  <strong>{activeBooking.slot.venueName || "Không rõ"}</strong>
+                </div>
+                <div className="slot-booking-detail-full">
+                  <span>Địa chỉ</span>
+                  <strong>{activeBooking.slot.venueAddress || "Không rõ"}</strong>
+                </div>
+                <div className="slot-booking-detail-full">
+                  <span>Ghi chú</span>
+                  <strong>{activeBooking.note || "Không có ghi chú"}</strong>
+                </div>
+                <div className="slot-booking-detail-full">
+                  <span>Thời điểm tạo đơn</span>
+                  <strong>{formatDateTime(activeBooking.createdAt)}</strong>
+                </div>
+              </div>
+            ) : (
+              <p className="muted">Không có dữ liệu đơn.</p>
+            )}
+          </div>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "--";
+  return new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).format(new Date(value));
+}
+
+function formatTimeRange(start: string | null, end: string | null) {
+  if (!start || !end) return "--";
+  const s = new Date(start);
+  const e = new Date(end);
+  const fmt = new Intl.DateTimeFormat("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+  return `${fmt.format(s)} - ${fmt.format(e)}`;
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat("vi-VN", {
+    style: "currency",
+    currency: "VND",
+    maximumFractionDigits: 0
+  }).format(Number(value || 0));
+}
+
+function slotMs(value: string) {
+  return new Date(value).getTime();
+}
+
+function formatBookingSpan(slotCount: number, start: string | null, end: string | null) {
+  if (!start || !end) return `${slotCount} ô`;
+  const minutes = Math.max(0, Math.round((new Date(end).getTime() - new Date(start).getTime()) / 60000));
+  if (!minutes) return `${slotCount} ô`;
+  return `${slotCount} ô • ${minutes} phút`;
 }
 
 function getVietnamDateInputValue(date: Date) {
@@ -598,4 +808,3 @@ function buildTimelineLabels(startHm: string, endHm: string) {
   }
   return labels;
 }
-
