@@ -19,8 +19,29 @@ function localTimestamp(date, hm) {
   return `${date}T${hm}:00+07:00`;
 }
 
+function normalizeTimestamp(value) {
+  return new Date(value).toISOString();
+}
+
+export function buildSlotKey(fieldId, startTime, endTime) {
+  return `${fieldId}|${normalizeTimestamp(startTime)}|${normalizeTimestamp(endTime)}`;
+}
+
+function ymdInTz(date, timeZone = VN_TIMEZONE) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
 function todayYmdInVn() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: VN_TIMEZONE }).format(new Date());
+  return ymdInTz(new Date(), VN_TIMEZONE);
 }
 
 function ymdAddDays(ymd, days) {
@@ -31,7 +52,10 @@ function ymdAddDays(ymd, days) {
 export function isDateInRollingWindow(date, daysAhead = 5) {
   const today = todayYmdInVn();
   const maxDate = ymdAddDays(today, daysAhead);
-  return date >= today && date <= maxDate;
+  const target = new Date(`${date}T00:00:00+07:00`).getTime();
+  const min = new Date(`${today}T00:00:00+07:00`).getTime();
+  const max = new Date(`${maxDate}T00:00:00+07:00`).getTime();
+  return Number.isFinite(target) && target >= min && target <= max;
 }
 
 /**
@@ -72,7 +96,7 @@ export async function ensureVenueDailySlots(
   }
 
   const existingKeys = new Set(
-    (existing || []).map((slot) => `${slot.field_id}|${slot.start_time}|${slot.end_time}`)
+    (existing || []).map((slot) => buildSlotKey(slot.field_id, slot.start_time, slot.end_time))
   );
 
   const rowsToInsert = [];
@@ -83,7 +107,7 @@ export async function ensureVenueDailySlots(
       const endHm = formatHmFromMinutes(end);
       const startTs = localTimestamp(date, startHm);
       const endTs = localTimestamp(date, endHm);
-      const key = `${fieldId}|${new Date(startTs).toISOString()}|${new Date(endTs).toISOString()}`;
+      const key = buildSlotKey(fieldId, startTs, endTs);
       if (existingKeys.has(key)) continue;
       existingKeys.add(key);
       rowsToInsert.push({
