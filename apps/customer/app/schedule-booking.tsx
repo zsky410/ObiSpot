@@ -3,11 +3,10 @@ import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import { useCallback, useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
-import Toast from "react-native-toast-message";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
 import { pitchImageByKey } from "../src/lib/pitchImages";
-import { ApiRequestError, createBookingApi, getSlotsApi, type Slot } from "../src/lib/api";
+import { ApiRequestError, createBookingApi, getSlotsApi, type Slot, type SlotBusyRange } from "../src/lib/api";
 import { formatVnd, getDateOffsetVietnam, weekdayFromDate } from "../src/lib/dateVietnam";
 import { useAuth } from "../src/store/auth";
 
@@ -58,18 +57,12 @@ export default function ScheduleBookingScreen() {
         throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
       }
       const data = await createBookingApi(accessToken, payload.ids, "Đặt từ màn đặt lịch trực quan");
-      return { data, totalPriceVnd: payload.totalPriceVnd, slotCount: payload.ids.length };
+      return { data, totalPriceVnd: payload.totalPriceVnd };
     },
-    onSuccess: ({ data, totalPriceVnd, slotCount }) => {
+    onSuccess: ({ data, totalPriceVnd }) => {
       queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId, pitchFormat] });
       queryClient.invalidateQueries({ queryKey: ["slots"] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-      Toast.show({
-        type: "success",
-        text1: "Đặt sân thành công",
-        text2: `${slotCount} khung • ${formatVnd(totalPriceVnd)}`,
-        visibilityTime: 2800
-      });
       router.replace({
         pathname: "/booking-success",
         params: {
@@ -77,8 +70,7 @@ export default function ScheduleBookingScreen() {
           venueId: venueId || "",
           venueName: params.venueName || "Sân",
           selectedDate,
-          totalPrice: String(totalPriceVnd),
-          slotCount: String(slotCount)
+          totalPrice: String(totalPriceVnd)
         }
       });
     },
@@ -133,6 +125,8 @@ export default function ScheduleBookingScreen() {
     }
     return map;
   }, [slotItems, selectedDate]);
+
+  const busyRanges: SlotBusyRange[] = slotsQuery.data?.busyRanges ?? [];
 
   const activeBoundaryKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -194,7 +188,7 @@ export default function ScheduleBookingScreen() {
 
         <View style={styles.legendBar}>
           <View style={styles.legendRow}>
-            <LegendDot color="#D9DFE7" label="Không có slot" />
+            <LegendDot color="#D9DFE7" label="Đã đặt hoặc không mở" />
             <LegendDot color="#E8FCF3" label="Có thể chọn" />
             <LegendDot color="#42B883" label="Đã chọn" />
           </View>
@@ -255,7 +249,14 @@ export default function ScheduleBookingScreen() {
                     {fieldRows.map((fieldName) => {
                       const cellKey = `${fieldName}__${time}`;
                       const active = activeBoundaryKeys.has(cellKey);
-                      const isAvailable = boundaryMap.get(fieldName)?.has(time) ?? false;
+                      const overlapsBookedSlice = timelineSliceOverlapsBusy(
+                        fieldName,
+                        time,
+                        selectedDate,
+                        busyRanges
+                      );
+                      const isBoundaryFree = boundaryMap.get(fieldName)?.has(time) ?? false;
+                      const isAvailable = !overlapsBookedSlice && isBoundaryFree;
                       return (
                         <Pressable
                           key={`${fieldName}-${time}`}
@@ -291,7 +292,8 @@ export default function ScheduleBookingScreen() {
             <View style={{ flex: 1 }}>
               <Text style={styles.summaryTitle}>{params.venueName || "Sân bóng Đại học Bách Khoa"}</Text>
               <Text style={styles.summaryText}>
-                Sân {firstSel.fieldName} • {selectedSorted.length} khung ({slotDurationMinutes(firstSel)} phút/khung)
+                Sân {firstSel.fieldName} • {slotGridRowKey(firstSel.startTime, selectedDate) ?? "—"} —{" "}
+                {slotGridRowKey(lastSel?.endTime ?? firstSel.endTime, selectedDate) ?? "—"}
               </Text>
               <Text style={styles.summaryRating}>⭐ 4.8 (120 đánh giá)</Text>
             </View>
@@ -354,6 +356,25 @@ function slotPriceVnd(s: Slot) {
 
 function boundaryLabelMs(gridDateYmd: string, timeLabel: string) {
   return new Date(`${gridDateYmd}T${timeLabel}:00+07:00`).getTime();
+}
+
+/** Ô lưới `[rowLabel, rowLabel+30p)` có giao phần không rỗng với khoảng bận không. */
+function timelineSliceOverlapsBusy(
+  fieldName: string,
+  rowTimeLabel: string,
+  gridDateYmd: string,
+  ranges: SlotBusyRange[]
+): boolean {
+  const sliceStartMs = boundaryLabelMs(gridDateYmd, rowTimeLabel);
+  const sliceEndMs = sliceStartMs + 30 * 60 * 1000;
+  return ranges.some((b) => {
+    if (b.fieldName !== fieldName) {
+      return false;
+    }
+    const bs = slotMs(b.startTime);
+    const be = slotMs(b.endTime);
+    return sliceStartMs < be && bs < sliceEndMs;
+  });
 }
 
 /** HH:mm: phút từ 00:00 ngày `gridDateYmd` (+07) tới `iso`. */

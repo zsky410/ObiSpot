@@ -3,20 +3,21 @@ import { useMemo, useState } from "react";
 import {
   type AdminSlot,
   ApiRequestError,
-  createBulkSlotsApi,
   getAdminFieldsApi,
   getAdminSlotsApi,
   getVenuesApi,
-  patchAdminSlotStatusApi
+  patchAdminSlotsBulkStatusApi
 } from "../lib/api";
 import { useAuth } from "../store/auth";
 
 export function SlotsPage() {
   const { getValidAccessToken } = useAuth();
   const queryClient = useQueryClient();
-  const [venueId, setVenueId] = useState("");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [fieldIdForBulk, setFieldIdForBulk] = useState("");
+  const [expandedVenueId, setExpandedVenueId] = useState("");
+  const [fieldFilter, setFieldFilter] = useState("all");
+  const [actionMode, setActionMode] = useState<"block" | "unblock" | "reserve">("block");
+  const [selectedCellKeys, setSelectedCellKeys] = useState<string[]>([]);
 
   const venuesQuery = useQuery({
     queryKey: ["venues"],
@@ -24,84 +25,203 @@ export function SlotsPage() {
   });
 
   const slotsQuery = useQuery({
-    queryKey: ["admin-slots", date, venueId],
-    enabled: !!venueId,
+    queryKey: ["admin-slots", date, expandedVenueId],
+    enabled: !!expandedVenueId,
     queryFn: async () => {
       const token = await getValidAccessToken();
       if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
-      return getAdminSlotsApi(token, date, venueId);
+      return getAdminSlotsApi(token, date, expandedVenueId);
     }
   });
 
   const fieldsQuery = useQuery({
-    queryKey: ["admin-fields", venueId],
-    enabled: !!venueId,
+    queryKey: ["admin-fields", expandedVenueId],
+    enabled: !!expandedVenueId,
     queryFn: async () => {
       const token = await getValidAccessToken();
       if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
-      return getAdminFieldsApi(token, venueId);
+      return getAdminFieldsApi(token, expandedVenueId);
     }
   });
 
   const fields = useMemo(() => fieldsQuery.data?.items || [], [fieldsQuery.data?.items]);
 
   const toggleMutation = useMutation({
-    mutationFn: async (payload: { slotId: string; nextStatus: "available" | "blocked" }) => {
+    mutationFn: async (payload: { slotIds: string[]; nextStatus: "available" | "blocked" }) => {
       const token = await getValidAccessToken();
       if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
-      return patchAdminSlotStatusApi(token, payload.slotId, payload.nextStatus);
+      return patchAdminSlotsBulkStatusApi(token, { slotIds: payload.slotIds, status: payload.nextStatus });
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-slots"] })
-  });
-
-  const bulkMutation = useMutation({
-    mutationFn: async () => {
-      const token = await getValidAccessToken();
-      if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
-      if (!fieldIdForBulk) throw new Error("Vui lòng chọn sân để generate slot.");
-      return createBulkSlotsApi(token, {
-        fieldId: fieldIdForBulk,
-        fromDate: date,
-        toDate: date,
-        slotMinutes: 90,
-        dailyStart: "05:00",
-        dailyEnd: "23:00"
+    onMutate: async (payload) => {
+      const key = ["admin-slots", date, expandedVenueId] as const;
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<{ items: AdminSlot[] }>(key);
+      queryClient.setQueryData<{ items: AdminSlot[] }>(key, (old) => {
+        if (!old) return old;
+        const idSet = new Set(payload.slotIds);
+        return {
+          ...old,
+          items: old.items.map((slot) =>
+            idSet.has(slot.id) && slot.status !== "booked" ? { ...slot, status: payload.nextStatus } : slot
+          )
+        };
       });
+      return { previous, key };
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["admin-slots"] })
+    onError: (_err, _payload, ctx) => {
+      if (ctx?.previous) {
+        queryClient.setQueryData(ctx.key, ctx.previous);
+      }
+    }
   });
 
   const venues = venuesQuery.data?.items || [];
-  const slotGroups = useMemo(() => groupSlotsBySession(slotsQuery.data?.items || []), [slotsQuery.data?.items]);
+  const visibleFields = useMemo(() => {
+    if (fieldFilter === "all") return fields;
+    return fields.filter((f) => f.id === fieldFilter);
+  }, [fields, fieldFilter]);
+  const timelineLabels = useMemo(() => buildTimelineLabels("05:00", "23:00"), []);
+  const slotCellInfoMap = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        status: "none" | "available" | "blocked" | "booked";
+        availableIds: string[];
+        blockedIds: string[];
+        bookedIds: string[];
+      }
+    >();
+    const labelsWithMs = timelineLabels.map((label) => ({
+      label,
+      startMs: boundaryLabelMs(date, label),
+      endMs: boundaryLabelMs(date, label) + 30 * 60 * 1000
+    }));
+    for (const slot of slotsQuery.data?.items || []) {
+      const slotStartMs = new Date(slot.startTime).getTime();
+      const slotEndMs = new Date(slot.endTime).getTime();
+      for (const p of labelsWithMs) {
+        if (!(p.startMs < slotEndMs && slotStartMs < p.endMs)) continue;
+        const key = `${slot.fieldId}__${p.label}`;
+        const current = map.get(key) || {
+          status: "none" as const,
+          availableIds: [],
+          blockedIds: [],
+          bookedIds: []
+        };
+        if (slot.status === "booked") current.bookedIds.push(slot.id);
+        else if (slot.status === "blocked") current.blockedIds.push(slot.id);
+        else current.availableIds.push(slot.id);
+        map.set(key, current);
+      }
+    }
+    for (const [key, value] of map.entries()) {
+      const status = value.bookedIds.length
+        ? "booked"
+        : value.blockedIds.length
+          ? "blocked"
+          : value.availableIds.length
+            ? "available"
+            : "none";
+      map.set(key, { ...value, status });
+    }
+    return map;
+  }, [slotsQuery.data?.items, timelineLabels, date]);
+
+  function handleCellAction(slot: AdminSlot | undefined) {
+    if (!slot) return;
+    if (slot.status === "booked") return;
+    const cellKey = `${slot.fieldId}__${toHm(slot.startTime)}`;
+    setSelectedCellKeys((prev) =>
+      prev.includes(cellKey) ? prev.filter((k) => k !== cellKey) : [...prev, cellKey]
+    );
+  }
+
+  function applyActionOnSelected() {
+    if (selectedCellKeys.length === 0) {
+      window.alert("Vui lòng chọn ít nhất một slot.");
+      return;
+    }
+    const selectedCells = selectedCellKeys
+      .map((key) => ({ key, info: slotCellInfoMap.get(key) }))
+      .filter((row): row is { key: string; info: NonNullable<typeof row.info> } => Boolean(row.info));
+    if (selectedCells.length === 0) return;
+    if (selectedCells.some((c) => c.info.status === "booked")) {
+      window.alert("Có slot đã được user đặt. Hãy bỏ chọn các ô này.");
+      return;
+    }
+
+    if (actionMode === "block") {
+      const targetIds = Array.from(
+        new Set(selectedCells.flatMap((c) => c.info.availableIds))
+      );
+      if (targetIds.length === 0) {
+        window.alert("Chỉ có thể khóa slot đang mở.");
+        return;
+      }
+      toggleMutation
+        .mutateAsync({ slotIds: targetIds, nextStatus: "blocked" })
+        .then(() => setSelectedCellKeys([]))
+        .catch(() => undefined);
+      return;
+    }
+    if (actionMode === "unblock") {
+      const targetIds = Array.from(
+        new Set(selectedCells.flatMap((c) => c.info.blockedIds))
+      );
+      if (targetIds.length === 0) {
+        window.alert("Chỉ có thể mở lại slot đang bị khóa.");
+        return;
+      }
+      toggleMutation
+        .mutateAsync({ slotIds: targetIds, nextStatus: "available" })
+        .then(() => setSelectedCellKeys([]))
+        .catch(() => undefined);
+      return;
+    }
+    // reserve: giữ chỗ thủ công bằng cách khóa slot để app không đặt được.
+    const targetIds = Array.from(
+      new Set(selectedCells.flatMap((c) => c.info.availableIds))
+    );
+    if (targetIds.length > 0) {
+      toggleMutation
+        .mutateAsync({ slotIds: targetIds, nextStatus: "blocked" })
+        .then(() => setSelectedCellKeys([]))
+        .catch(() => undefined);
+      return;
+    }
+    window.alert("Chỉ có thể đặt giữ với slot đang mở.");
+  }
 
   return (
     <section>
-      <div className="filter-row card">
-        <label className="input-col">
-          <span>Chi nhánh</span>
-          <select
-            value={venueId}
-            onChange={(e) => {
-              setVenueId(e.target.value);
-              setFieldIdForBulk("");
-            }}
-          >
-            <option value="">-- Chọn chi nhánh --</option>
-            {venues.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name}
-              </option>
-            ))}
-          </select>
-        </label>
+      <div className="page-head slot-page-head">
+        <h3>Điều phối slot theo chi nhánh</h3>
+        <p className="muted">Chọn nhiều ô trực tiếp trên timeline rồi áp dụng thao tác hàng loạt.</p>
+      </div>
+
+      <div className="filter-row card slot-control-card">
         <label className="input-col">
           <span>Ngày</span>
-          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+          <input
+            type="date"
+            value={date}
+            onChange={(e) => {
+              setDate(e.target.value);
+              setSelectedCellKeys([]);
+            }}
+          />
         </label>
         <label className="input-col">
-          <span>Sân tạo slot</span>
-          <select value={fieldIdForBulk} onChange={(e) => setFieldIdForBulk(e.target.value)} disabled={!venueId}>
-            <option value="">-- Chọn sân --</option>
+          <span>Lọc sân</span>
+          <select
+            value={fieldFilter}
+            onChange={(e) => {
+              setFieldFilter(e.target.value);
+              setSelectedCellKeys([]);
+            }}
+            disabled={!expandedVenueId}
+          >
+            <option value="all">Tất cả sân</option>
             {fields.map((f) => (
               <option key={f.id} value={f.id}>
                 {f.name}
@@ -109,9 +229,18 @@ export function SlotsPage() {
             ))}
           </select>
         </label>
-        <button className="btn" onClick={() => bulkMutation.mutate()} disabled={!fieldIdForBulk || bulkMutation.isPending}>
-          {bulkMutation.isPending ? "Đang tạo..." : "Generate slots"}
+        <label className="input-col">
+          <span>Thao tác nhanh</span>
+          <select value={actionMode} onChange={(e) => setActionMode(e.target.value as typeof actionMode)}>
+            <option value="block">Khóa slot</option>
+            <option value="unblock">Mở slot</option>
+            <option value="reserve">Đặt giữ slot</option>
+          </select>
+        </label>
+        <button className="btn slot-apply-btn" onClick={applyActionOnSelected} disabled={selectedCellKeys.length === 0 || toggleMutation.isPending}>
+          {toggleMutation.isPending ? "Đang cập nhật..." : "Thực hiện"}
         </button>
+        <span className="slot-selected-count">Đã chọn: {selectedCellKeys.length} ô</span>
       </div>
 
       {venuesQuery.isError ? <p className="error">Không tải được danh sách chi nhánh.</p> : null}
@@ -125,60 +254,140 @@ export function SlotsPage() {
         </p>
       ) : null}
 
-      {slotsQuery.data?.items?.length ? (
-        <div className="slot-board card">
-          {slotGroups.map((group) => (
-            <div key={group.label} className="slot-group">
-              <div className="slot-group-title">{group.label}</div>
-              <div className="slot-grid">
-                {group.items.length === 0 ? <p className="muted">Không có ca</p> : null}
-                {group.items.map((slot) => {
-                  const nextStatus = slot.status === "available" ? "blocked" : "available";
-                  return (
-                    <button
-                      key={slot.id}
-                      className={`slot-chip slot-${slot.status}`}
-                      onClick={() => toggleMutation.mutate({ slotId: slot.id, nextStatus })}
-                      disabled={toggleMutation.isPending}
-                    >
-                      <span>{slot.fieldName}</span>
-                      <strong>{formatShortRange(slot.startTime, slot.endTime)}</strong>
-                    </button>
-                  );
-                })}
+      {venues.length ? (
+        <div className="slot-venue-list">
+          {venues.map((venue) => {
+            const open = expandedVenueId === venue.id;
+            return (
+              <div key={venue.id} className="card slot-venue-item">
+                <button
+                  className={`slot-venue-toggle ${open ? "open" : ""}`}
+                  onClick={() => {
+                    setExpandedVenueId((prev) => (prev === venue.id ? "" : venue.id));
+                    setFieldFilter("all");
+                    setSelectedCellKeys([]);
+                  }}
+                >
+                  <span>{venue.name}</span>
+                  <span>{open ? "▾" : "▸"}</span>
+                </button>
+                {open ? (
+                  <div className="slot-venue-body">
+                    <div className="slot-timeline-legend">
+                      <span>
+                        <i className="legend-dot legend-available" /> Chưa có slot
+                      </span>
+                      <span>
+                        <i className="legend-dot legend-booked" /> Đã có slot
+                      </span>
+                      <span>
+                        <i className="legend-dot legend-selected" /> Đang chọn
+                      </span>
+                    </div>
+                    <div className="slot-timeline-wrap">
+                      <table className="slot-timeline-table">
+                        <thead>
+                          <tr>
+                            <th>Giờ</th>
+                            {visibleFields.map((f) => (
+                              <th key={f.id}>{f.name}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {timelineLabels.map((label) => (
+                            <tr key={label}>
+                              <td className="slot-time-col">{label}</td>
+                              {visibleFields.map((f) => {
+                                const cellKey = `${f.id}__${label}`;
+                                const cellInfo = slotCellInfoMap.get(cellKey);
+                                const isSelected = selectedCellKeys.includes(cellKey);
+                                const cellStatusClass = !cellInfo || cellInfo.status === "none"
+                                  ? "slot-cell-none"
+                                  : cellInfo.status === "blocked"
+                                      ? "slot-cell-blocked"
+                                      : "slot-cell-filled";
+                                return (
+                                  <td key={`${f.id}-${label}`}>
+                                    <button
+                                      className={`slot-cell ${cellStatusClass} ${isSelected ? "slot-cell-selected" : ""}`}
+                                      disabled={!cellInfo || cellInfo.status === "none" || cellInfo.status === "booked" || toggleMutation.isPending}
+                                      onClick={() =>
+                                        handleCellAction(
+                                          cellInfo
+                                            ? ({
+                                                id: cellInfo.availableIds[0] || cellInfo.blockedIds[0] || cellInfo.bookedIds[0] || "",
+                                                fieldId: f.id,
+                                                fieldName: f.name,
+                                                startTime: `${date}T${label}:00+07:00`,
+                                                endTime: `${date}T${label}:00+07:00`,
+                                                status: cellInfo.status === "booked" ? "booked" : cellInfo.status === "blocked" ? "blocked" : "available",
+                                                bookingStatus: cellInfo.status === "booked" ? "confirmed" : null
+                                              } as AdminSlot)
+                                            : undefined
+                                        )
+                                      }
+                                      title={
+                                        !cellInfo || cellInfo.status === "none"
+                                          ? "Không có slot"
+                                          : cellInfo.status === "booked"
+                                            ? `${f.name} · Đã có đơn`
+                                            : cellInfo.status === "blocked"
+                                              ? `${f.name} · Slot đang khóa`
+                                              : `${f.name} · Slot đang mở`
+                                      }
+                                    >
+                                      &nbsp;
+                                    </button>
+                                  </td>
+                                );
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {!slotsQuery.isLoading && (slotsQuery.data?.items?.length || 0) === 0 ? (
+                        <p className="muted">Ngày này chưa có slot. Hãy Generate cho sân cần mở lịch.</p>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
-      ) : null}
+      ) : (
+        <p className="muted">Chưa có chi nhánh.</p>
+      )}
     </section>
   );
 }
 
-function formatShortRange(start: string, end: string) {
-  const s = new Date(start).toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", hour: "2-digit", minute: "2-digit" });
-  const e = new Date(end).toLocaleTimeString("vi-VN", { timeZone: "Asia/Ho_Chi_Minh", hour: "2-digit", minute: "2-digit" });
-  return `${s} - ${e}`;
+function boundaryLabelMs(date: string, label: string) {
+  return new Date(`${date}T${label}:00+07:00`).getTime();
 }
 
-function groupSlotsBySession(items: AdminSlot[]) {
-  const groups = [
-    { label: "Buổi sáng", items: [] as AdminSlot[] },
-    { label: "Buổi chiều", items: [] as AdminSlot[] },
-    { label: "Buổi tối", items: [] as AdminSlot[] }
-  ];
-
-  for (const slot of items) {
-    const hour = Number(
-      new Date(slot.startTime).toLocaleTimeString("en-GB", {
-        timeZone: "Asia/Ho_Chi_Minh",
-        hour: "2-digit",
-        hour12: false
-      })
-    );
-    if (hour < 12) groups[0].items.push(slot);
-    else if (hour < 18) groups[1].items.push(slot);
-    else groups[2].items.push(slot);
+function buildTimelineLabels(startHm: string, endHm: string) {
+  const labels: string[] = [];
+  const [sh, sm] = startHm.split(":").map(Number);
+  const [eh, em] = endHm.split(":").map(Number);
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+  for (let m = start; m <= end; m += 30) {
+    const h = Math.floor(m / 60)
+      .toString()
+      .padStart(2, "0");
+    const mm = (m % 60).toString().padStart(2, "0");
+    labels.push(`${h}:${mm}`);
   }
-  return groups;
+  return labels;
+}
+
+function toHm(iso: string) {
+  return new Date(iso).toLocaleTimeString("en-GB", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
 }

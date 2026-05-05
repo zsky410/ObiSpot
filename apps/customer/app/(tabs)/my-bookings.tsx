@@ -56,7 +56,7 @@ export default function MyBookingsScreen() {
         <View style={styles.rowWrap}>
           {[
             { key: "pending", label: "Đang chờ" },
-            { key: "confirmed", label: "Đã nhận" },
+            { key: "confirmed", label: "Đã xác nhận" },
             { key: "cancelled", label: "Đã hủy" },
             { key: "all", label: "Tất cả" }
           ].map((item) => {
@@ -115,7 +115,7 @@ export default function MyBookingsScreen() {
 function BookingItem({ item }: { item: MyBooking }) {
   const statusMap = {
     pending: { label: "Đang chờ xác nhận", color: "#6C7B90", bg: "#ECF1F8" },
-    confirmed: { label: "Đã nhận sân", color: "#087B57", bg: "#DDF9EE" },
+    confirmed: { label: "Đã xác nhận", color: "#087B57", bg: "#DDF9EE" },
     cancelled: { label: "Đã hủy", color: "#BA1A1A", bg: "#FFE8E8" }
   };
   const status = statusMap[item.status];
@@ -157,7 +157,7 @@ function BookingItem({ item }: { item: MyBooking }) {
           ) : null}
         </View>
         <View style={styles.priceCol}>
-          <Text style={styles.priceLabel}>Giá slot</Text>
+          <Text style={styles.priceLabel}>Giá sân</Text>
           <Text style={styles.priceValue}>{formatVnd(item.slot.pricePerSlot)}</Text>
           <Text style={styles.detailHint}>Chi tiết ›</Text>
         </View>

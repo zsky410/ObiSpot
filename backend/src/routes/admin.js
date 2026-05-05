@@ -12,6 +12,7 @@ import {
   validateQuery
 } from "../utils/validate.js";
 import { computeSlotPriceVnd } from "../lib/slotPricing.js";
+import { ensureVenueDailySlots, isDateInRollingWindow } from "../lib/slotAutoSeed.js";
 
 export const adminRouter = Router();
 
@@ -28,6 +29,12 @@ const adminSlotsQuerySchema = z.object({
 const adminFieldsQuerySchema = z.object({
   venueId: uuidLikeSchema
 });
+const adminDashboardQuerySchema = z.object({
+  fromDate: z.iso.date().optional(),
+  toDate: z.iso.date().optional(),
+  venueId: uuidLikeSchema.optional(),
+  status: z.enum(["pending", "confirmed", "cancelled"]).optional()
+});
 const bookingParamsSchema = z.object({
   bookingId: uuidLikeSchema
 });
@@ -38,6 +45,10 @@ const slotParamsSchema = z.object({
   slotId: uuidLikeSchema
 });
 const updateSlotBodySchema = z.object({
+  status: z.enum(["available", "blocked"])
+});
+const bulkUpdateSlotStatusBodySchema = z.object({
+  slotIds: z.array(uuidLikeSchema).min(1).max(300),
   status: z.enum(["available", "blocked"])
 });
 const bulkSlotsBodySchema = z.object({
@@ -80,37 +91,77 @@ adminRouter.get(
       );
     }
     const { date, status } = req.validatedQuery;
-    let query = supabaseAdminClient
+    const query = supabaseAdminClient
       .from("bookings")
       .select(
-        "id, status, created_at, user_id, slot_id, profiles:user_id(full_name), time_slots:slot_id(start_time, end_time, fields:field_id(name, venue_id))"
+        "id, order_id, status, created_at, user_id, slot_id, profiles:user_id(full_name), time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venue_id, venues:venue_id(name, address)))"
       );
-
-    if (status) {
-      query = query.eq("status", status);
-    }
 
     const { data, error } = await query.order("created_at", { ascending: false });
     if (error) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin bookings");
     }
 
-    let items = (data || []).map((item) => {
+    const grouped = new Map();
+    for (const item of data || []) {
       const profile = Array.isArray(item.profiles) ? item.profiles[0] : item.profiles;
       const timeSlot = Array.isArray(item.time_slots) ? item.time_slots[0] : item.time_slots;
       const field = Array.isArray(timeSlot?.fields) ? timeSlot.fields[0] : timeSlot?.fields;
-      return {
-        id: item.id,
-        status: item.status,
-        createdAt: item.created_at,
-        userId: item.user_id,
-        customerName: profile?.full_name || "",
-        slotId: item.slot_id,
-        slotStartTime: timeSlot?.start_time || null,
-        slotEndTime: timeSlot?.end_time || null,
-        fieldName: field?.name || "",
-        venueId: field?.venue_id || null
-      };
+      const venue = Array.isArray(field?.venues) ? field.venues[0] : field?.venues;
+      const key = item.order_id || item.id;
+      const existing = grouped.get(key);
+      const slotPrice = Number(timeSlot?.price_vnd ?? 0);
+      if (!existing) {
+        grouped.set(key, {
+          id: key,
+          status: item.status,
+          createdAt: item.created_at,
+          userId: item.user_id,
+          customerName: profile?.full_name || "",
+          slotId: item.slot_id,
+          slotStartTime: timeSlot?.start_time || null,
+          slotEndTime: timeSlot?.end_time || null,
+          fieldName: field?.name || "",
+          venueId: field?.venue_id || null,
+          venueName: venue?.name || "",
+          venueAddress: venue?.address || "",
+          totalPrice: slotPrice,
+          slotCount: 1
+        });
+        continue;
+      }
+
+      const startMs = timeSlot?.start_time ? new Date(timeSlot.start_time).getTime() : null;
+      const endMs = timeSlot?.end_time ? new Date(timeSlot.end_time).getTime() : null;
+      const curStartMs = existing.slotStartTime ? new Date(existing.slotStartTime).getTime() : Number.POSITIVE_INFINITY;
+      const curEndMs = existing.slotEndTime ? new Date(existing.slotEndTime).getTime() : Number.NEGATIVE_INFINITY;
+      if (startMs !== null && startMs < curStartMs) {
+        existing.slotStartTime = timeSlot.start_time;
+      }
+      if (endMs !== null && endMs > curEndMs) {
+        existing.slotEndTime = timeSlot.end_time;
+      }
+      existing.slotCount += 1;
+      existing.totalPrice += slotPrice;
+      if (!existing.venueName && venue?.name) {
+        existing.venueName = venue.name;
+      }
+      if (!existing.venueAddress && venue?.address) {
+        existing.venueAddress = venue.address;
+      }
+      if (item.status === "pending" || existing.status === "pending") {
+        existing.status = "pending";
+      } else if (item.status === "confirmed" || existing.status === "confirmed") {
+        existing.status = "confirmed";
+      } else {
+        existing.status = "cancelled";
+      }
+    }
+
+    let items = Array.from(grouped.values()).sort((a, b) => {
+      const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+      const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+      return tb - ta;
     });
 
     if (date) {
@@ -121,6 +172,9 @@ adminRouter.get(
         const slotDate = new Date(item.slotStartTime).toISOString().slice(0, 10);
         return slotDate === date;
       });
+    }
+    if (status) {
+      items = items.filter((item) => item.status === status);
     }
 
     return res.status(200).json({ items });
@@ -144,42 +198,59 @@ adminRouter.patch(
     const { bookingId } = req.validatedParams;
     const { status } = req.validatedBody;
 
-    const { data: current, error: currentError } = await supabaseAdminClient
+    // bookingId có thể là id một dòng hoặc order_id chung (nhiều slot). Không dùng maybeSingle()
+    // với .or(...): nếu order_id khớp nhiều dòng, PostgREST sẽ lỗi "multiple rows".
+    const { data: matchRows, error: currentError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, status")
-      .eq("id", bookingId)
-      .maybeSingle();
+      .select("id, order_id, status")
+      .or(`id.eq.${bookingId},order_id.eq.${bookingId}`)
+      .limit(1);
 
+    const current = matchRows?.[0];
     if (currentError || !current) {
       return sendError(res, 404, ERROR_CODES.bookingNotFound, "Booking not found");
     }
 
-    if (current.status !== "pending") {
+    const orderId = current.order_id ?? current.id;
+    const orderFilter = current.order_id != null ? { column: "order_id", value: orderId } : { column: "id", value: current.id };
+
+    const { data: rowsInOrder, error: orderReadError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, status")
+      .eq(orderFilter.column, orderFilter.value);
+
+    if (orderReadError || !rowsInOrder || rowsInOrder.length === 0) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booking order");
+    }
+
+    if (rowsInOrder.some((row) => row.status !== "pending")) {
       return sendError(
         res,
         409,
         ERROR_CODES.invalidStatusTransition,
-        "Only pending booking can be updated"
+        "Only pending booking/order can be updated"
       );
     }
 
     const { data, error } = await supabaseAdminClient
       .from("bookings")
       .update({ status })
-      .eq("id", bookingId)
-      .select("id, status, slot_id, user_id, created_at")
-      .single();
+      .eq(orderFilter.column, orderFilter.value)
+      .select("id, status, slot_id, user_id, created_at, order_id");
 
     if (error) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to update booking");
     }
 
+    const first = (data || [])[0];
     return res.status(200).json({
-      id: data.id,
-      status: data.status,
-      slotId: data.slot_id,
-      userId: data.user_id,
-      createdAt: data.created_at
+      id: orderId,
+      orderId,
+      updatedCount: (data || []).length,
+      status: first?.status || status,
+      slotId: first?.slot_id || null,
+      userId: first?.user_id || null,
+      createdAt: first?.created_at || null
     });
   })
 );
@@ -226,6 +297,15 @@ adminRouter.get(
       );
     }
     const { date, venueId } = req.validatedQuery;
+    if (isDateInRollingWindow(date, 5)) {
+      await ensureVenueDailySlots(supabaseAdminClient, {
+        venueId,
+        date,
+        slotMinutes: 30,
+        dailyStart: "05:00",
+        dailyEnd: "23:00"
+      });
+    }
     const start = new Date(`${date}T00:00:00+07:00`).toISOString();
     const end = new Date(`${date}T23:59:59+07:00`).toISOString();
 
@@ -241,15 +321,38 @@ adminRouter.get(
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin slots");
     }
 
-    const items = (data || []).map((slot) => {
+    const slots = data || [];
+    let bookedBySlotId = new Map();
+    if (slots.length > 0) {
+      const slotIds = slots.map((s) => s.id);
+      const bookingRows = [];
+      const chunkSize = 80;
+      for (let i = 0; i < slotIds.length; i += chunkSize) {
+        const batch = slotIds.slice(i, i + chunkSize);
+        const { data: batchRows, error: bookingError } = await supabaseAdminClient
+          .from("bookings")
+          .select("slot_id, status")
+          .in("slot_id", batch)
+          .in("status", ["pending", "confirmed"]);
+        if (bookingError) {
+          return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve slot bookings");
+        }
+        bookingRows.push(...(batchRows || []));
+      }
+      bookedBySlotId = new Map(bookingRows.map((row) => [row.slot_id, row.status]));
+    }
+
+    const items = slots.map((slot) => {
       const field = Array.isArray(slot.fields) ? slot.fields[0] : slot.fields;
+      const bookedStatus = bookedBySlotId.get(slot.id);
       return {
         id: slot.id,
         fieldId: slot.field_id,
         fieldName: field?.name || "",
         startTime: slot.start_time,
         endTime: slot.end_time,
-        status: slot.status
+        status: bookedStatus ? "booked" : slot.status,
+        bookingStatus: bookedStatus || null
       };
     });
 
@@ -358,49 +461,157 @@ adminRouter.post(
 
 adminRouter.get(
   "/dashboard",
-  asyncHandler(async (_req, res) => {
-    const now = new Date();
-    const todayDate = now.toISOString().slice(0, 10);
-    const start = `${todayDate}T00:00:00+07:00`;
-    const end = `${todayDate}T23:59:59+07:00`;
+  validateQuery(adminDashboardQuerySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid dashboard query params",
+        { fields: req.validationError }
+      );
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    const defaultFromDate = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const { fromDate = defaultFromDate, toDate = today, venueId, status } = req.validatedQuery;
 
-    const { data: slotsData, error: slotsError } = await supabaseAdminClient
-      .from("time_slots")
-      .select("id")
-      .gte("start_time", start)
-      .lte("start_time", end);
+    const rangeStart = localTimestamp(fromDate, "00:00");
+    const rangeEndExclusive = new Date(new Date(localTimestamp(toDate, "00:00")).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
-    if (slotsError) {
-      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch dashboard slots");
+    let bookingQuery = supabaseAdminClient
+      .from("bookings")
+      .select(
+        "id, order_id, status, created_at, slot_id, time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venue_id, venues:venue_id(name)))"
+      )
+      .gte("created_at", rangeStart)
+      .lt("created_at", rangeEndExclusive);
+    if (status) {
+      bookingQuery = bookingQuery.eq("status", status);
     }
 
-    const { data: activeBookings, error: bookingError } = await supabaseAdminClient
-      .from("bookings")
-      .select("id, slot_id, time_slots:slot_id(start_time)")
-      .in("status", ["pending", "confirmed"]);
-
+    const { data: bookingRows, error: bookingError } = await bookingQuery.order("created_at", { ascending: true });
     if (bookingError) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch dashboard bookings");
     }
 
-    const activeToday = (activeBookings || []).filter((item) => {
-      const slotStartTime = item.time_slots?.start_time;
-      if (!slotStartTime) {
-        return false;
+    const orders = new Map();
+    for (const row of bookingRows || []) {
+      const key = row.order_id || row.id;
+      const timeSlot = Array.isArray(row.time_slots) ? row.time_slots[0] : row.time_slots;
+      const field = Array.isArray(timeSlot?.fields) ? timeSlot.fields[0] : timeSlot?.fields;
+      const venue = Array.isArray(field?.venues) ? field.venues[0] : field?.venues;
+      if (venueId && field?.venue_id !== venueId) {
+        continue;
       }
-      const slotDate = new Date(slotStartTime).toISOString().slice(0, 10);
-      return slotDate === todayDate;
-    });
+      const slotPrice = Number(timeSlot?.price_vnd ?? 0);
+      const existing = orders.get(key);
+      if (!existing) {
+        orders.set(key, {
+          orderId: key,
+          status: row.status,
+          createdAt: row.created_at,
+          totalPrice: slotPrice,
+          venueId: field?.venue_id || null,
+          venueName: venue?.name || ""
+        });
+        continue;
+      }
+      existing.totalPrice += slotPrice;
+      if (row.status === "pending" || existing.status === "pending") existing.status = "pending";
+      else if (row.status === "confirmed" || existing.status === "confirmed") existing.status = "confirmed";
+      else existing.status = "cancelled";
+    }
 
-    const totalSlotsToday = (slotsData || []).length;
-    const bookingsToday = activeToday.length;
-    const slotUtilization = totalSlotsToday === 0 ? 0 : Number((bookingsToday / totalSlotsToday).toFixed(2));
+    const orderItems = Array.from(orders.values());
+    const statusCount = {
+      pending: orderItems.filter((i) => i.status === "pending").length,
+      confirmed: orderItems.filter((i) => i.status === "confirmed").length,
+      cancelled: orderItems.filter((i) => i.status === "cancelled").length
+    };
+    const ordersTotal = orderItems.length;
+    const revenueTotal = orderItems
+      .filter((i) => i.status === "confirmed")
+      .reduce((acc, i) => acc + Number(i.totalPrice || 0), 0);
+
+    const days = [];
+    let cursor = new Date(localTimestamp(fromDate, "00:00"));
+    const endCursor = new Date(localTimestamp(toDate, "00:00"));
+    while (cursor.getTime() <= endCursor.getTime()) {
+      days.push(cursor.toISOString().slice(0, 10));
+      cursor = new Date(cursor.getTime() + 24 * 60 * 60 * 1000);
+    }
+    const orderByDayMap = new Map(days.map((d) => [d, { date: d, orders: 0, revenue: 0 }]));
+    for (const item of orderItems) {
+      const dayKey = item.createdAt ? new Date(item.createdAt).toISOString().slice(0, 10) : null;
+      if (!dayKey || !orderByDayMap.has(dayKey)) continue;
+      const slot = orderByDayMap.get(dayKey);
+      slot.orders += 1;
+      if (item.status === "confirmed") {
+        slot.revenue += Number(item.totalPrice || 0);
+      }
+    }
+    const ordersByDay = Array.from(orderByDayMap.values());
+
+    let slotQuery = supabaseAdminClient
+      .from("time_slots")
+      .select("id, status, fields:field_id!inner(venue_id)")
+      .gte("start_time", rangeStart)
+      .lt("start_time", rangeEndExclusive);
+    if (venueId) {
+      slotQuery = slotQuery.eq("fields.venue_id", venueId);
+    }
+    const { data: slotRows, error: slotError } = await slotQuery;
+    if (slotError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch dashboard slots");
+    }
+
+    const totalSlots = (slotRows || []).length;
+    const activeRowsCount = (bookingRows || []).filter((r) => r.status === "pending" || r.status === "confirmed").length;
+    const slotUtilization = totalSlots === 0 ? 0 : Number((activeRowsCount / totalSlots).toFixed(2));
 
     return res.status(200).json({
-      date: todayDate,
-      bookingsToday,
-      totalSlotsToday,
-      slotUtilization
+      fromDate,
+      toDate,
+      filters: { venueId: venueId || null, status: status || "all" },
+      ordersTotal,
+      revenueTotal,
+      totalSlots,
+      slotUtilization,
+      statusCount,
+      ordersByDay
+    });
+  })
+);
+
+adminRouter.patch(
+  "/slots/status/bulk",
+  validateBody(bulkUpdateSlotStatusBodySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid bulk update slot status request",
+        { fields: req.validationError }
+      );
+    }
+    const { slotIds, status } = req.validatedBody;
+    const { data, error } = await supabaseAdminClient
+      .from("time_slots")
+      .update({ status })
+      .in("id", slotIds)
+      .select("id");
+
+    if (error) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to bulk update slot status");
+    }
+
+    return res.status(200).json({
+      updatedCount: (data || []).length,
+      slotIds: (data || []).map((row) => row.id),
+      status
     });
   })
 );
