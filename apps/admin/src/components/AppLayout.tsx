@@ -23,7 +23,7 @@ export function AppLayout() {
       <aside className="sidebar panel">
         <div className="brand-block">
           <img src="/obispottext_logo.png" alt="ObiSpot" className="brand-logo" />
-          <p className="brand-sub">Operational Hub</p>
+          <p className="brand-sub">Field Manager · Operational Hub</p>
         </div>
         <nav className="nav-col">
           <NavLink className="nav-item" to="/dashboard">
@@ -35,10 +35,15 @@ export function AppLayout() {
           <NavLink className="nav-item" to="/slots">
             Quản lý khung giờ
           </NavLink>
+          <a className="nav-item nav-item-muted" href="#">
+            FAQ Chatbot
+          </a>
         </nav>
-        <button className="btn btn-outline sidebar-logout" onClick={logout}>
-          Cài đặt / Đăng xuất
-        </button>
+        <div className="sidebar-foot">
+          <button className="btn btn-outline sidebar-logout" onClick={logout}>
+            Cài đặt / Đăng xuất
+          </button>
+        </div>
       </aside>
       <main className="content panel">
         <header className="topbar">

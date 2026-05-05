@@ -135,6 +135,13 @@ export type Slot = {
   pricePerSlot: number;
 };
 
+/** Khung đã bận (đơn chờ/xác nhận hoặc slot blocked) để khớp lưới 30 phút trên app. */
+export type SlotBusyRange = {
+  fieldName: string;
+  startTime: string;
+  endTime: string;
+};
+
 export type MyBooking = {
   id: string;
   status: "pending" | "confirmed" | "cancelled";
@@ -164,7 +171,7 @@ export async function getSlotsApi(date: string, venueId: string, pitchFormat?: "
   if (pitchFormat) {
     q.set("pitchFormat", pitchFormat);
   }
-  return apiRequest<{ date: string; items: Slot[] }>(`/slots?${q.toString()}`);
+  return apiRequest<{ date: string; items: Slot[]; busyRanges?: SlotBusyRange[] }>(`/slots?${q.toString()}`);
 }
 
 export async function createBookingApi(token: string, slotIds: string[], note?: string) {

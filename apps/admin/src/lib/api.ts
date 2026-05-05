@@ -50,10 +50,26 @@ export type AuthSessionPayload = {
 };
 
 export type AdminDashboard = {
-  date: string;
-  bookingsToday: number;
-  totalSlotsToday: number;
+  fromDate: string;
+  toDate: string;
+  filters: {
+    venueId: string | null;
+    status: "all" | "pending" | "confirmed" | "cancelled";
+  };
+  ordersTotal: number;
+  revenueTotal: number;
+  totalSlots: number;
   slotUtilization: number;
+  statusCount: {
+    pending: number;
+    confirmed: number;
+    cancelled: number;
+  };
+  ordersByDay: Array<{
+    date: string;
+    orders: number;
+    revenue: number;
+  }>;
 };
 
 export type AdminBooking = {
@@ -67,6 +83,10 @@ export type AdminBooking = {
   slotEndTime: string | null;
   fieldName: string;
   venueId: string | null;
+  venueName?: string;
+  venueAddress?: string;
+  totalPrice?: number;
+  slotCount?: number;
 };
 
 export type AdminSlot = {
@@ -75,7 +95,8 @@ export type AdminSlot = {
   fieldName: string;
   startTime: string;
   endTime: string;
-  status: "available" | "blocked";
+  status: "available" | "blocked" | "booked";
+  bookingStatus?: "pending" | "confirmed" | null;
 };
 
 export type Venue = {
@@ -102,8 +123,21 @@ export async function getVenuesApi() {
   return apiRequest<{ items: Venue[] }>("/venues");
 }
 
-export async function getAdminDashboardApi(token: string) {
-  return apiRequest<AdminDashboard>("/admin/dashboard", { token });
+export async function getAdminDashboardApi(
+  token: string,
+  params?: {
+    fromDate?: string;
+    toDate?: string;
+    venueId?: string;
+    status?: "all" | "pending" | "confirmed" | "cancelled";
+  }
+) {
+  const q = new URLSearchParams();
+  if (params?.fromDate) q.set("fromDate", params.fromDate);
+  if (params?.toDate) q.set("toDate", params.toDate);
+  if (params?.venueId) q.set("venueId", params.venueId);
+  if (params?.status && params.status !== "all") q.set("status", params.status);
+  return apiRequest<AdminDashboard>(`/admin/dashboard${q.size ? `?${q.toString()}` : ""}`, { token });
 }
 
 export async function getAdminBookingsApi(token: string, date?: string, status?: string) {
@@ -137,6 +171,20 @@ export async function patchAdminSlotStatusApi(token: string, slotId: string, sta
     token,
     body: { status }
   });
+}
+
+export async function patchAdminSlotsBulkStatusApi(
+  token: string,
+  payload: { slotIds: string[]; status: "available" | "blocked" }
+) {
+  return apiRequest<{ updatedCount: number; slotIds: string[]; status: "available" | "blocked" }>(
+    "/admin/slots/status/bulk",
+    {
+      method: "PATCH",
+      token,
+      body: payload
+    }
+  );
 }
 
 export async function createBulkSlotsApi(

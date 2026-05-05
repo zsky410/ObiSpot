@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { supabaseAdminClient } from "../lib/supabase.js";
+import { ensureVenueDailySlots, isDateInRollingWindow } from "../lib/slotAutoSeed.js";
 import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
 import { hasValidationError, uuidLikeSchema, validateQuery } from "../utils/validate.js";
@@ -27,21 +28,30 @@ slotsRouter.get(
       );
     }
     const { date, venueId, pitchFormat } = req.validatedQuery;
+    if (isDateInRollingWindow(date, 5)) {
+      await ensureVenueDailySlots(supabaseAdminClient, {
+        venueId,
+        date,
+        slotMinutes: 30,
+        dailyStart: "05:00",
+        dailyEnd: "23:00"
+      });
+    }
 
-    const start = new Date(`${date}T00:00:00+07:00`).toISOString();
-    const end = new Date(`${date}T23:59:59+07:00`).toISOString();
+    const dayStart = new Date(`${date}T00:00:00+07:00`).toISOString();
+    const dayEndExclusive = new Date(new Date(`${date}T00:00:00+07:00`).getTime() + 24 * 60 * 60 * 1000).toISOString();
 
     // Đọc trực tiếp time_slots (luôn có mọi cột mới như price_vnd). View available_slots + SELECT ts.*
     // trong Postgres không tự thêm cột sau ALTER TABLE → select price_vnd trên view có thể lỗi 500.
+    // Mọi ô trùng ngày (+07): các slot giao với [dayStart, dayEndExclusive) (không chỉ start_time trong ngày).
     let slotQuery = supabaseAdminClient
       .from("time_slots")
       .select(
         "id, field_id, start_time, end_time, status, price_vnd, fields:field_id!inner(name, venue_id, price_per_slot, pitch_format)"
       )
-      .eq("status", "available")
       .eq("fields.venue_id", venueId)
-      .gte("start_time", start)
-      .lte("start_time", end);
+      .lt("start_time", dayEndExclusive)
+      .gt("end_time", dayStart);
     if (pitchFormat) {
       slotQuery = slotQuery.eq("fields.pitch_format", pitchFormat);
     }
@@ -67,7 +77,16 @@ slotsRouter.get(
       bookedSlotIds = new Set((bookingRows || []).map((b) => b.slot_id));
     }
 
-    const data = rows.filter((s) => !bookedSlotIds.has(s.id));
+    /** Khoảng đã bận (booking hoặc blocked) — client vẽ ô thời gian, tránh nhầm chỉ mốc biên slot với “còn trống”. */
+    const busyRanges = rows
+      .filter((s) => bookedSlotIds.has(s.id) || s.status === "blocked")
+      .map((s) => ({
+        fieldName: s.fields?.name || "",
+        startTime: s.start_time,
+        endTime: s.end_time
+      }));
+
+    const data = rows.filter((s) => s.status === "available" && !bookedSlotIds.has(s.id));
 
     const items = data.map((slot) => ({
       id: slot.id,
@@ -80,6 +99,6 @@ slotsRouter.get(
       pricePerSlot: Number(slot.price_vnd ?? slot.fields?.price_per_slot ?? 0)
     }));
 
-    return res.status(200).json({ date, items });
+    return res.status(200).json({ date, items, busyRanges });
   })
 );

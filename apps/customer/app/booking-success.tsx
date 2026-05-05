@@ -11,7 +11,6 @@ export default function BookingSuccessScreen() {
     venueName?: string;
     selectedDate?: string;
     totalPrice?: string;
-    slotCount?: string;
   }>();
   const bookingCode = (params.bookingId || "SP-20240430-01").slice(0, 12).toUpperCase();
   const heroKey = params.venueId || params.bookingId || "success";
