@@ -188,6 +188,27 @@ export type MyBooking = {
   };
 };
 
+export type ChatbotReply = {
+  sessionId?: string | null;
+  reply: string;
+  source: "db+llm" | "fallback";
+  suggestions?: string[];
+  state?: Record<string, unknown>;
+};
+
+export type ChatbotHistoryItem = {
+  role: "assistant" | "user";
+  text: string;
+};
+
+export type ChatbotSessionMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  source?: "db+llm" | "fallback";
+  createdAt?: string | null;
+};
+
 export async function getVenuesApi() {
   return apiRequest<{ items: Venue[] }>("/venues");
 }
@@ -328,6 +349,35 @@ export async function requestBookingCancelApi(
     body: {
       note: payload.note || null,
       refundBankAccount: payload.refundBankAccount
+    }
+  });
+}
+
+export async function getChatbotSessionApi(token: string) {
+  return apiRequest<{
+    sessionId: string | null;
+    items: ChatbotSessionMessage[];
+    state?: Record<string, unknown>;
+  }>("/chatbot/session", {
+    token
+  });
+}
+
+export async function queryChatbotApi(
+  token: string,
+  message: string,
+  options: {
+    sessionId?: string | null;
+    history?: ChatbotHistoryItem[];
+  } = {}
+) {
+  return apiRequest<ChatbotReply>("/chatbot/query", {
+    method: "POST",
+    token,
+    body: {
+      message,
+      sessionId: options.sessionId || undefined,
+      history: options.history || []
     }
   });
 }

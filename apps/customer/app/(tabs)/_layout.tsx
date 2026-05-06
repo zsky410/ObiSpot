@@ -15,6 +15,7 @@ export default function TabsLayout() {
           elevation: 12,
           zIndex: 20
         },
+        tabBarHideOnKeyboard: true,
         sceneStyle: { backgroundColor: "#F3F6FB" }
       }}
     >

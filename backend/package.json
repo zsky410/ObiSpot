@@ -13,6 +13,7 @@
     "dedupe:slots": "node scripts/dedupe-time-slots.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@supabase/supabase-js": "^2.55.0",
     "cors": "^2.8.6",
     "dotenv": "^16.6.1",
