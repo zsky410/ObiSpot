@@ -6,6 +6,7 @@ import { slotsRouter } from "./routes/slots.js";
 import { bookingsRouter } from "./routes/bookings.js";
 import { adminRouter } from "./routes/admin.js";
 import { chatbotRouter } from "./routes/chatbot.js";
+import { paymentsRouter } from "./routes/payments.js";
 import { requestLogger } from "./middleware/logger.js";
 import { supabaseAdminClient } from "./lib/supabase.js";
 import { ERROR_CODES } from "./utils/errorCodes.js";
@@ -37,6 +38,7 @@ app.use("/api/v1/auth", authRouter);
 app.use("/api/v1/venues", venuesRouter);
 app.use("/api/v1/slots", slotsRouter);
 app.use("/api/v1/bookings", bookingsRouter);
+app.use("/api/v1/payments", paymentsRouter);
 app.use("/api/v1/admin", adminRouter);
 app.use("/api/v1/chatbot", chatbotRouter);
 

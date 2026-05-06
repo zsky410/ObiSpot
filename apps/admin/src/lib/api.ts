@@ -49,6 +49,24 @@ export type AuthSessionPayload = {
   user: { id: string; fullName: string; role: string };
 };
 
+export type RefundBankAccount = {
+  bankName: string;
+  accountNumber: string;
+  accountHolderName: string;
+};
+
+export type AdminRefundRequest = {
+  id: string;
+  totalAmountVnd: number;
+  feePercent: number;
+  refundAmountVnd: number;
+  status: "pending" | "approved" | "rejected" | "refunded";
+  requestedAt: string | null;
+  decidedAt: string | null;
+  note: string | null;
+  bankAccount: RefundBankAccount | null;
+};
+
 export type AdminDashboard = {
   fromDate: string;
   toDate: string;
@@ -75,6 +93,7 @@ export type AdminDashboard = {
 export type AdminBooking = {
   id: string;
   status: "pending" | "confirmed" | "cancelled";
+  paymentStatus?: "awaiting" | "paid" | "expired" | "refunded";
   createdAt: string;
   userId: string;
   customerName: string;
@@ -92,6 +111,7 @@ export type AdminBooking = {
   venueAddress?: string;
   totalPrice?: number;
   slotCount?: number;
+  refundRequest?: AdminRefundRequest | null;
 };
 
 type AdminBookingsResponse = {
@@ -191,6 +211,13 @@ export async function getAdminBookingsApi(token: string, date?: string, status?:
       venueAddress: item.venueAddress ?? "",
       totalPrice: item.totalPrice ?? 0,
       slotCount: item.slotCount ?? 1,
+      paymentStatus: item.paymentStatus ?? "awaiting",
+      refundRequest: item.refundRequest
+        ? {
+            ...item.refundRequest,
+            bankAccount: item.refundRequest.bankAccount ?? null
+          }
+        : null,
       cancelRequest: {
         status: item.cancelRequest?.status ?? null,
         requestedAt: item.cancelRequest?.requestedAt ?? null,
@@ -198,6 +225,17 @@ export async function getAdminBookingsApi(token: string, date?: string, status?:
       }
     })) as AdminBooking[]
   };
+}
+
+export async function patchAdminRefundRequestApi(token: string, refundRequestId: string) {
+  return apiRequest<{ id: string; orderId: string; status: "refunded" }>(
+    `/admin/refund-requests/${refundRequestId}`,
+    {
+      method: "PATCH",
+      token,
+      body: { action: "mark_refunded" }
+    }
+  );
 }
 
 export async function patchAdminBookingStatusApi(token: string, bookingId: string, status: "confirmed" | "cancelled") {

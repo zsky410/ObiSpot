@@ -4,6 +4,7 @@ import {
   ApiRequestError,
   getAdminBookingsApi,
   patchAdminBookingCancelRequestApi,
+  patchAdminRefundRequestApi,
   patchAdminBookingStatusApi,
   type AdminBooking
 } from "../lib/api";
@@ -47,6 +48,17 @@ export function BookingsPage() {
       queryClient.invalidateQueries({ queryKey: ["admin-bookings"] });
       queryClient.invalidateQueries({ queryKey: ["admin-dashboard"] });
       queryClient.invalidateQueries({ queryKey: ["admin-slots"] });
+    }
+  });
+  const markRefundedMutation = useMutation({
+    mutationFn: async (args: { refundRequestId: string }) => {
+      const token = await getValidAccessToken();
+      if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
+      return patchAdminRefundRequestApi(token, args.refundRequestId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-bookings"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-dashboard"] });
     }
   });
 
@@ -99,6 +111,8 @@ export function BookingsPage() {
                 <th>Giờ đặt</th>
                 <th>Giá tiền</th>
                 <th>Trạng thái</th>
+                <th>Thanh toán</th>
+                <th>Nhận hoàn</th>
                 <th>Hành động</th>
               </tr>
             </thead>
@@ -107,7 +121,7 @@ export function BookingsPage() {
                 <BookingRow
                   key={item.id}
                   item={item}
-                  loading={updateMutation.isPending || cancelRequestMutation.isPending}
+                  loading={updateMutation.isPending || cancelRequestMutation.isPending || markRefundedMutation.isPending}
                   onConfirm={() => updateMutation.mutate({ bookingId: item.id, status: "confirmed" })}
                   onCancel={() => updateMutation.mutate({ bookingId: item.id, status: "cancelled" })}
                   onApproveCancelRequest={() =>
@@ -115,6 +129,9 @@ export function BookingsPage() {
                   }
                   onRejectCancelRequest={() =>
                     cancelRequestMutation.mutate({ bookingId: item.id, decision: "rejected" })
+                  }
+                  onMarkRefunded={() =>
+                    item.refundRequest?.id && markRefundedMutation.mutate({ refundRequestId: item.refundRequest.id })
                   }
                 />
               ))}
@@ -132,7 +149,8 @@ function BookingRow({
   onConfirm,
   onCancel,
   onApproveCancelRequest,
-  onRejectCancelRequest
+  onRejectCancelRequest,
+  onMarkRefunded
 }: {
   item: AdminBooking;
   loading: boolean;
@@ -140,6 +158,7 @@ function BookingRow({
   onCancel: () => void;
   onApproveCancelRequest: () => void;
   onRejectCancelRequest: () => void;
+  onMarkRefunded: () => void;
 }) {
   const cancelRequest = item.cancelRequest ?? { status: null, requestedAt: null, note: null };
   const hasPendingCancelRequest = cancelRequest.status === "pending";
@@ -153,6 +172,20 @@ function BookingRow({
       : item.status === "confirmed"
         ? "Đã xác nhận"
         : "Đã hủy";
+  const paymentLabel =
+    item.paymentStatus === "paid"
+      ? "Đã thanh toán"
+      : item.paymentStatus === "expired"
+        ? "Hết hạn"
+        : item.paymentStatus === "refunded"
+          ? "Đã hoàn"
+          : "Chờ thanh toán";
+  const refundLabel = item.refundRequest
+    ? item.refundRequest.feePercent === 30
+      ? "Hoàn 70% (phí 30%)"
+      : "Hoàn 100%"
+    : null;
+  const refundStatusLabel = item.refundRequest ? formatRefundStatus(item.refundRequest.status) : null;
   return (
     <tr>
       <td>
@@ -189,6 +222,34 @@ function BookingRow({
         </div>
       </td>
       <td>
+        <div className="booking-status-stack">
+          <span className="status-badge">{paymentLabel}</span>
+          {refundLabel ? <span className="status-badge status-cancel-request">{refundLabel}</span> : null}
+        </div>
+      </td>
+      <td>
+        {item.refundRequest ? (
+          <div className="booking-status-stack">
+            <span className="cell-price">{formatVnd(item.refundRequest.refundAmountVnd)}</span>
+            {refundStatusLabel ? <span className="cell-muted">{refundStatusLabel}</span> : null}
+            {item.refundRequest.bankAccount ? (
+              <>
+                <span className="cell-text">{item.refundRequest.bankAccount.bankName}</span>
+                <span className="cell-muted cell-code">STK: {item.refundRequest.bankAccount.accountNumber}</span>
+                <span className="cell-muted">Người thụ hưởng: {item.refundRequest.bankAccount.accountHolderName}</span>
+              </>
+            ) : (
+              <span className="cell-muted">Khách chưa cung cấp tài khoản nhận hoàn.</span>
+            )}
+            {item.refundRequest.requestedAt ? (
+              <span className="cell-muted">Gửi lúc {formatDateTime(item.refundRequest.requestedAt)}</span>
+            ) : null}
+          </div>
+        ) : (
+          <span className="cell-muted">—</span>
+        )}
+      </td>
+      <td>
         <div className="table-actions">
           {hasPendingCancelRequest ? (
             <>
@@ -211,7 +272,13 @@ function BookingRow({
           ) : item.status === "confirmed" ? (
             <span className="action-state action-state-success">Đã xác nhận</span>
           ) : (
-            <span className="action-state action-state-danger">Đơn đã hủy</span>
+            item.refundRequest && item.refundRequest.status !== "refunded" ? (
+              <button className="btn-sm btn-sm" onClick={onMarkRefunded} disabled={loading}>
+                Xác nhận đã hoàn
+              </button>
+            ) : (
+              <span className="action-state action-state-danger">Đơn đã hủy</span>
+            )
           )}
         </div>
       </td>
@@ -246,4 +313,22 @@ function formatVnd(value: number) {
     style: "currency",
     currency: "VND"
   }).format(Number.isFinite(value) ? value : 0);
+}
+
+function formatDateTime(value: string) {
+  return new Date(value).toLocaleString("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function formatRefundStatus(status: "pending" | "approved" | "rejected" | "refunded") {
+  if (status === "approved") return "Hoàn tiền: đã duyệt";
+  if (status === "rejected") return "Hoàn tiền: đã từ chối";
+  if (status === "refunded") return "Hoàn tiền: đã xong";
+  return "Hoàn tiền: chờ xử lý";
 }

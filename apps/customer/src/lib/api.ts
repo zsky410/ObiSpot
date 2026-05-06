@@ -142,9 +142,29 @@ export type SlotBusyRange = {
   endTime: string;
 };
 
+export type RefundBankAccount = {
+  bankName: string;
+  accountNumber: string;
+  accountHolderName: string;
+};
+
+export type RefundRequestSummary = {
+  totalAmountVnd: number;
+  feePercent: number;
+  refundAmountVnd: number;
+  status: "pending" | "approved" | "rejected" | "refunded";
+  requestedAt: string | null;
+  decidedAt: string | null;
+  note: string | null;
+  bankAccount: RefundBankAccount | null;
+};
+
 export type MyBooking = {
   id: string;
   status: "pending" | "confirmed" | "cancelled";
+  paymentStatus?: "awaiting" | "paid" | "expired" | "refunded";
+  paymentPaidAt?: string | null;
+  paymentExpiresAt?: string | null;
   createdAt: string | null;
   note: string | null;
   cancelRequest: {
@@ -152,6 +172,7 @@ export type MyBooking = {
     requestedAt: string | null;
     note: string | null;
   };
+  refundRequest?: RefundRequestSummary | null;
   slot: {
     id: string | null;
     startTime: string | null;
@@ -187,14 +208,28 @@ export async function createBookingApi(token: string, slotIds: string[], note?: 
 
   return apiRequest<{
     id: string;
+    orderId?: string;
     bookingIds?: string[];
     slotIds?: string[];
     status: "pending" | "confirmed" | "cancelled";
+    paymentStatus: "awaiting" | "paid" | "expired" | "refunded";
     slotId?: string;
     userId: string;
     createdAt: string;
     rangeStart?: string;
     rangeEnd?: string;
+    payment?: {
+      invoiceNumber: string;
+      amountVnd: number;
+      checkoutUrl: string | null;
+      checkoutForm?: {
+        actionUrl: string;
+        fields: Record<string, string | number>;
+      } | null;
+      qrUrl?: string | null;
+      expiresAt: string;
+      paymentMethod?: string | null;
+    };
   }>("/bookings", {
     method: "POST",
     token,
@@ -202,13 +237,82 @@ export async function createBookingApi(token: string, slotIds: string[], note?: 
   });
 }
 
-export async function getMyBookingsApi(token: string) {
-  return apiRequest<{ items: MyBooking[] }>("/bookings/me", {
+export async function getOrderPaymentApi(token: string, bookingId: string) {
+  return apiRequest<{
+    id: string;
+    payment: {
+      invoiceNumber: string;
+      amountVnd: number;
+      checkoutUrl: string | null;
+      checkoutForm?: {
+        actionUrl: string;
+        fields: Record<string, string | number>;
+      } | null;
+      qrUrl?: string | null;
+      paymentMethod?: string | null;
+      status: "awaiting" | "paid" | "expired" | "refunded";
+      paidAt: string | null;
+      expiresAt: string | null;
+    };
+  }>(`/bookings/${bookingId}/payment`, { token });
+}
+
+export async function reconcileOrderPaymentApi(token: string, bookingId: string) {
+  return apiRequest<{
+    ok: boolean;
+    payment: {
+      orderId: string;
+      invoiceNumber: string;
+      status: "awaiting" | "paid" | "expired" | "refunded";
+      paidAt: string | null;
+      reconciled: boolean;
+      sepayOrderStatus?: string;
+      sepayTransactionStatus?: string;
+    };
+  }>(`/payments/sepay/reconcile/${bookingId}`, {
+    method: "POST",
     token
   });
 }
 
-export async function requestBookingCancelApi(token: string, bookingId: string, note?: string) {
+export async function getRefundQuoteApi(token: string, bookingId: string) {
+  return apiRequest<{
+    id: string;
+    paymentStatus: "awaiting" | "paid" | "expired" | "refunded";
+    refundQuote: {
+      totalAmountVnd: number;
+      feePercent: 0 | 30;
+      refundAmountVnd: number;
+    };
+  }>(`/bookings/${bookingId}/refund-quote`, { token });
+}
+
+export async function getMyBookingsApi(token: string) {
+  const data = await apiRequest<{ items: MyBooking[] }>("/bookings/me", {
+    token
+  });
+
+  return {
+    items: (data.items || []).map((item) => ({
+      ...item,
+      refundRequest: item.refundRequest
+        ? {
+            ...item.refundRequest,
+            bankAccount: item.refundRequest.bankAccount ?? null
+          }
+        : null
+    }))
+  };
+}
+
+export async function requestBookingCancelApi(
+  token: string,
+  bookingId: string,
+  payload: {
+    refundBankAccount: RefundBankAccount;
+    note?: string | null;
+  }
+) {
   return apiRequest<{
     id: string;
     updatedCount: number;
@@ -217,9 +321,13 @@ export async function requestBookingCancelApi(token: string, bookingId: string, 
       requestedAt: string | null;
       note: string | null;
     };
+    refundRequest?: RefundRequestSummary | null;
   }>(`/bookings/${bookingId}/cancel-request`, {
     method: "POST",
     token,
-    body: { note: note || null }
+    body: {
+      note: payload.note || null,
+      refundBankAccount: payload.refundBankAccount
+    }
   });
 }

@@ -28,8 +28,8 @@ export default function BookingSuccessScreen() {
         <View style={styles.iconWrap}>
           <Text style={styles.icon}>✓</Text>
         </View>
-        <Text style={styles.title}>Đặt sân thành công!</Text>
-        <Text style={styles.subtitle}>Đơn đặt sân của bạn đã được xác nhận. Thông tin chi tiết bên dưới.</Text>
+        <Text style={styles.title}>Thanh toán đã được ghi nhận</Text>
+        <Text style={styles.subtitle}>Đơn của bạn đang chờ admin/chủ sân xác nhận. Bạn chưa cần gửi biên lai nếu SePay đã báo thành công.</Text>
 
         <View style={styles.heroThumb}>
           <ImagePlaceholder height={120} borderRadius={12} source={pitchImageByKey(heroKey)} />
@@ -43,7 +43,7 @@ export default function BookingSuccessScreen() {
         </View>
 
         <View style={styles.noteBox}>
-          <Text style={styles.note}>ⓘ Vui lòng đến trước 15 phút để chuẩn bị và làm thủ tục nhận sân.</Text>
+          <Text style={styles.note}>ⓘ Khi admin xác nhận xong, đơn sẽ chuyển sang trạng thái đã chốt lịch. Vui lòng đến trước 15 phút để chuẩn bị.</Text>
         </View>
 
         <Pressable style={styles.primaryBtn} onPress={() => router.replace("/(tabs)/my-bookings")}>

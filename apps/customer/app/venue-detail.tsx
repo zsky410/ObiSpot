@@ -1,13 +1,17 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
+import { getDateOffsetVietnam } from "../src/lib/dateVietnam";
+import { getSlotsApi } from "../src/lib/api";
 import { pitchImageByKey } from "../src/lib/pitchImages";
 
 export default function VenueDetailScreen() {
   const insets = useSafeAreaInsets();
+  const queryClient = useQueryClient();
   const params = useLocalSearchParams<{
     venueId?: string;
     venueName?: string;
@@ -84,17 +88,25 @@ export default function VenueDetailScreen() {
       <View style={[styles.bottomCtaWrap, { paddingBottom: Math.max(insets.bottom, 10) }]}>
         <Pressable
           style={styles.primaryButton}
-          onPress={() =>
+          onPress={async () => {
+            const selectedFormat = selectedPitchType === "7" ? "7v7" : "5v5";
+            if (venueId) {
+              const date = getDateOffsetVietnam(0);
+              queryClient.prefetchQuery({
+                queryKey: ["slots", date, venueId, selectedFormat],
+                queryFn: () => getSlotsApi(date, venueId, selectedFormat)
+              });
+            }
             router.push({
               pathname: "/schedule-booking",
               params: {
                 venueId,
                 venueName,
                 venueAddress,
-                pitchFormat: selectedPitchType === "7" ? "7v7" : "5v5"
+                pitchFormat: selectedFormat
               }
-            })
-          }
+            });
+          }}
         >
           <Text style={styles.primaryButtonText}>ĐẶT SÂN NGAY</Text>
         </Pressable>

@@ -15,6 +15,46 @@ const slotsQuerySchema = z.object({
   pitchFormat: z.enum(["5v5", "7v7"]).optional()
 });
 
+function chunk(values, size) {
+  const chunks = [];
+  for (let i = 0; i < values.length; i += size) {
+    chunks.push(values.slice(i, i + size));
+  }
+  return chunks;
+}
+
+async function fetchBookedSlotIds(slotIds) {
+  const uniqueIds = [...new Set(slotIds.filter(Boolean))];
+  if (uniqueIds.length === 0) {
+    return { data: [], error: null };
+  }
+
+  const bookedSlotIds = new Set();
+  for (const ids of chunk(uniqueIds, 200)) {
+    const { data: bookingRows, error } = await selectAllPages(
+      () =>
+        supabaseAdminClient
+          .from("bookings")
+          .select("slot_id")
+          .in("slot_id", ids)
+          .in("status", ["pending", "confirmed"]),
+      { pageSize: 1000 }
+    );
+
+    if (error) {
+      return { data: null, error };
+    }
+
+    for (const booking of bookingRows || []) {
+      if (booking?.slot_id) {
+        bookedSlotIds.add(booking.slot_id);
+      }
+    }
+  }
+
+  return { data: [...bookedSlotIds], error: null };
+}
+
 slotsRouter.get(
   "/",
   validateQuery(slotsQuerySchema),
@@ -69,39 +109,26 @@ slotsRouter.get(
     let bookedSlotIds = new Set();
     if (rows.length > 0) {
       const ids = rows.map((s) => s.id);
-      const bookingRows = [];
-      const chunkSize = 80;
-      for (let i = 0; i < ids.length; i += chunkSize) {
-        const batch = ids.slice(i, i + chunkSize);
-        const { data: batchRows, error: bookingsError } = await supabaseAdminClient
-          .from("bookings")
-          .select("slot_id")
-          .in("slot_id", batch)
-          .in("status", ["pending", "confirmed"]);
-
-        if (bookingsError) {
-          return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booked slots");
-        }
-        bookingRows.push(...(batchRows || []));
+      const { data: bookedIds, error: bookingsError } = await fetchBookedSlotIds(ids);
+      if (bookingsError) {
+        return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booked slots");
       }
-      bookedSlotIds = new Set(bookingRows.map((b) => b.slot_id));
+      bookedSlotIds = new Set(bookedIds || []);
+    }
+
+    const groupedBySlotKey = new Map();
+    for (const row of rows) {
+      const key = buildSlotKey(row.field_id, row.start_time, row.end_time);
+      const group = groupedBySlotKey.get(key);
+      if (group) {
+        group.push(row);
+      } else {
+        groupedBySlotKey.set(key, [row]);
+      }
     }
 
     const uniqueSlots = [];
-    const seenSlotKeys = new Set();
-    for (const slot of rows) {
-      const key = buildSlotKey(slot.field_id, slot.start_time, slot.end_time);
-      if (seenSlotKeys.has(key)) {
-        continue;
-      }
-      seenSlotKeys.add(key);
-
-      const siblings = rows.filter(
-        (candidate) =>
-          candidate.field_id === slot.field_id &&
-          candidate.start_time === slot.start_time &&
-          candidate.end_time === slot.end_time
-      );
+    for (const siblings of groupedBySlotKey.values()) {
       const hasBookedSibling = siblings.some((candidate) => bookedSlotIds.has(candidate.id));
       const blockedSibling = siblings.find((candidate) => candidate.status === "blocked");
       const availableSibling = siblings.find((candidate) => candidate.status === "available");

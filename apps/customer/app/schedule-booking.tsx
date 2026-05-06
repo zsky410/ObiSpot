@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Ionicons } from "@expo/vector-icons";
-import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
-import { useCallback, useMemo, useState } from "react";
+import { router, useLocalSearchParams } from "expo-router";
+import { useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
@@ -47,7 +47,8 @@ export default function ScheduleBookingScreen() {
   const slotsQuery = useQuery({
     queryKey: ["slots", selectedDate, venueId, pitchFormat],
     enabled: !!venueId,
-    queryFn: () => getSlotsApi(selectedDate, venueId, pitchFormat)
+    queryFn: () => getSlotsApi(selectedDate, venueId, pitchFormat),
+    staleTime: 30 * 1000
   });
 
   const createMutation = useMutation({
@@ -63,10 +64,19 @@ export default function ScheduleBookingScreen() {
       queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId, pitchFormat] });
       queryClient.invalidateQueries({ queryKey: ["slots"] });
       queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
-      router.replace({
-        pathname: "/booking-success",
+      router.push({
+        pathname: "/payment-method",
         params: {
+          orderId: data.orderId || data.id,
           bookingId: data.id,
+          amountVnd: String(data.payment?.amountVnd || totalPriceVnd),
+          invoiceNumber: data.payment?.invoiceNumber || "",
+          checkoutUrl: data.payment?.checkoutUrl || "",
+          checkoutActionUrl: data.payment?.checkoutForm?.actionUrl || "",
+          checkoutFieldsJson: data.payment?.checkoutForm ? JSON.stringify(data.payment.checkoutForm.fields) : "",
+          qrUrl: data.payment?.qrUrl || "",
+          expiresAt: data.payment?.expiresAt || "",
+          paymentMethod: data.payment?.paymentMethod || "",
           venueId: venueId || "",
           venueName: params.venueName || "Sân",
           selectedDate,
@@ -98,15 +108,6 @@ export default function ScheduleBookingScreen() {
     return deduped;
   }, [slotsQuery.data?.items]);
   const timelineTimes = useMemo(() => buildTimelineLabels(), []);
-
-  useFocusEffect(
-    useCallback(() => {
-      if (venueId) {
-        queryClient.invalidateQueries({ queryKey: ["slots", selectedDate, venueId, pitchFormat] });
-      }
-      return undefined;
-    }, [queryClient, selectedDate, venueId, pitchFormat])
-  );
 
   const selectedSorted = useMemo(
     () => slotsFromBoundarySelection(slotItems, selection, selectedDate, timelineTimes),
@@ -278,6 +279,15 @@ export default function ScheduleBookingScreen() {
                       <Text style={styles.tableTimeLabelText}>{time}</Text>
                     </View>
                     {fieldRows.map((fieldName) => {
+                      const isFirstLoad = slotsQuery.isPending && !slotsQuery.data;
+                      if (isFirstLoad) {
+                        return (
+                          <View
+                            key={`${fieldName}-${time}`}
+                            style={[styles.tableSlotCell, styles.tableSlotCellLoading]}
+                          />
+                        );
+                      }
                       const cellKey = `${fieldName}__${time}`;
                       const active = selectedCellKeys.has(cellKey);
                       const isBoundaryOnly = !active && activeBoundaryKeys.has(cellKey);
@@ -315,6 +325,7 @@ export default function ScheduleBookingScreen() {
             </View>
           </ScrollView>
         </View>
+        {slotsQuery.isFetching ? <Text style={styles.slotsFetchingHint}>Đang cập nhật khung giờ...</Text> : null}
 
         {!!firstSel && (
           <View style={styles.venueInfoCard}>
@@ -656,6 +667,9 @@ const styles = StyleSheet.create({
   tableSlotCellBooked: {
     backgroundColor: "#E3E8EF"
   },
+  tableSlotCellLoading: {
+    backgroundColor: "#EEF3F9"
+  },
   tableSlotCellActive: {
     backgroundColor: "#42B883"
   },
@@ -691,7 +705,8 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     alignItems: "center"
   },
-  nextButtonText: { color: "#fff", fontWeight: "900", letterSpacing: 1 }
+  nextButtonText: { color: "#fff", fontWeight: "900", letterSpacing: 1 },
+  slotsFetchingHint: { color: "#6C7C91", fontSize: 12, marginTop: 4 }
 });
 
 function LegendDot({ color, label }: { color: string; label: string }) {

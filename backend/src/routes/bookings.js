@@ -1,7 +1,16 @@
 import { Router } from "express";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { encodeRefundRequestNote, parseRefundRequestNote } from "../lib/refundRequestMetadata.js";
 import { supabaseAdminClient } from "../lib/supabase.js";
+import { env } from "../config/env.js";
+import {
+  buildSepayCheckoutForm,
+  buildSepayCheckoutPayload,
+  buildInternalCheckoutUrl,
+  buildPaymentCallbackUrls,
+  buildVietQrPreviewUrl
+} from "../lib/sepayGateway.js";
 import { requireAuth } from "../middleware/auth.js";
 import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
@@ -26,8 +35,26 @@ const createBookingBodySchema = z
 const bookingParamsSchema = z.object({
   bookingId: uuidLikeSchema
 });
+const refundBankAccountSchema = z.object({
+  bankName: z.string().trim().min(2).max(120),
+  accountNumber: z
+    .string()
+    .trim()
+    .min(6)
+    .max(34)
+    .regex(/^[0-9 ]+$/)
+    .refine((value) => {
+      const normalized = value.replace(/\s+/g, "");
+      return normalized.length >= 6 && normalized.length <= 30;
+    }, "Account number must be 6-30 digits"),
+  accountHolderName: z.string().trim().min(2).max(120)
+});
 const cancelRequestBodySchema = z.object({
-  note: z.string().trim().max(300).optional().nullable()
+  note: z.string().trim().max(300).optional().nullable(),
+  refundBankAccount: refundBankAccountSchema
+});
+const bookingOrderParamsSchema = z.object({
+  bookingId: uuidLikeSchema
 });
 
 function slotInstantMs(iso) {
@@ -64,11 +91,137 @@ function aggregateCancelRequest(rows) {
   };
 }
 
+function normalizeRefundBankAccount(bankAccount) {
+  return {
+    bankName: bankAccount.bankName.trim(),
+    accountNumber: bankAccount.accountNumber.replace(/\s+/g, ""),
+    accountHolderName: bankAccount.accountHolderName.trim()
+  };
+}
+
+function mapRefundRequestRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  const parsedMetadata = parseRefundRequestNote(row.note);
+
+  const hasBankAccount = Boolean(
+    row.beneficiary_bank_name || row.beneficiary_account_number || row.beneficiary_account_name
+  );
+
+  return {
+    totalAmountVnd: Number(row.total_amount_vnd ?? 0),
+    feePercent: Number(row.fee_percent ?? 0),
+    refundAmountVnd: Number(row.refund_amount_vnd ?? 0),
+    status: row.status,
+    requestedAt: row.requested_at || null,
+    decidedAt: row.decided_at || null,
+    note: parsedMetadata.note,
+    bankAccount: hasBankAccount
+      ? {
+          bankName: row.beneficiary_bank_name || "",
+          accountNumber: row.beneficiary_account_number || "",
+          accountHolderName: row.beneficiary_account_name || ""
+        }
+      : parsedMetadata.bankAccount
+  };
+}
+
+function isMissingRefundBankColumnsError(error) {
+  const message = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`;
+  return /beneficiary_(bank_name|account_number|account_name)/i.test(message);
+}
+
+async function fetchRefundRequestRowsByOrderIds(orderIds) {
+  if (!orderIds.length) {
+    return { data: [], error: null };
+  }
+
+  const baseSelect = "order_id, total_amount_vnd, fee_percent, refund_amount_vnd, status, requested_at, decided_at, note";
+  const extendedSelect = `${baseSelect}, beneficiary_bank_name, beneficiary_account_number, beneficiary_account_name`;
+
+  let result = await supabaseAdminClient.from("refund_requests").select(extendedSelect).in("order_id", orderIds);
+  if (result.error && isMissingRefundBankColumnsError(result.error)) {
+    result = await supabaseAdminClient.from("refund_requests").select(baseSelect).in("order_id", orderIds);
+  }
+
+  return result;
+}
+
+async function upsertRefundRequestWithFallback(payload, refundBankAccount) {
+  const extendedPayload = {
+    ...payload,
+    beneficiary_bank_name: refundBankAccount.bankName,
+    beneficiary_account_number: refundBankAccount.accountNumber,
+    beneficiary_account_name: refundBankAccount.accountHolderName
+  };
+
+  let result = await supabaseAdminClient.from("refund_requests").upsert(extendedPayload, {
+    onConflict: "order_id"
+  });
+
+  if (result.error && isMissingRefundBankColumnsError(result.error)) {
+    result = await supabaseAdminClient.from("refund_requests").upsert(
+      {
+        ...payload,
+        note: encodeRefundRequestNote({
+          note: payload.note || null,
+          bankAccount: refundBankAccount
+        })
+      },
+      { onConflict: "order_id" }
+    );
+  }
+
+  return result;
+}
+
+function buildCheckoutFormResponse({ invoiceNumber, amountVnd, successUrl, errorUrl, cancelUrl }) {
+  if (!env.sepayMerchantId || !env.sepayMerchantSecretKey) {
+    return null;
+  }
+
+  const payload = buildSepayCheckoutPayload({
+    invoiceNumber,
+    amountVnd,
+    description: `Thanh toan don ${invoiceNumber}`,
+    successUrl,
+    errorUrl,
+    cancelUrl
+  });
+
+  return buildSepayCheckoutForm(payload);
+}
+
+export async function expireUnpaidBookings() {
+  const nowIso = new Date().toISOString();
+  const { data: expiredPaymentRows, error: expiredPaymentsError } = await supabaseAdminClient
+    .from("payments")
+    .update({ status: "expired" })
+    .eq("status", "awaiting")
+    .lt("expires_at", nowIso)
+    .select("order_id");
+
+  if (expiredPaymentsError || !expiredPaymentRows || expiredPaymentRows.length === 0) {
+    return;
+  }
+
+  const orderIds = expiredPaymentRows.map((row) => row.order_id);
+  await supabaseAdminClient
+    .from("bookings")
+    .update({ status: "cancelled", payment_status: "expired" })
+    .in("order_id", orderIds)
+    .eq("payment_status", "awaiting");
+}
+
 bookingsRouter.post(
   "/",
   requireAuth,
   validateBody(createBookingBodySchema),
   asyncHandler(async (req, res) => {
+    await expireUnpaidBookings();
+
     if (hasValidationError(req)) {
       return sendError(
         res,
@@ -84,7 +237,7 @@ bookingsRouter.post(
 
     const { data: slotRows, error: slotsReadError } = await supabaseAdminClient
       .from("time_slots")
-      .select("id, field_id, start_time, end_time, status")
+      .select("id, field_id, start_time, end_time, status, price_vnd")
       .in("id", uniqueIds);
 
     if (slotsReadError || !slotRows || slotRows.length !== uniqueIds.length) {
@@ -138,6 +291,7 @@ bookingsRouter.post(
 
     const createdIds = [];
     const orderId = randomUUID();
+    const paymentExpiresAt = new Date(Date.now() + Math.max(1, env.paymentHoldMinutes) * 60 * 1000).toISOString();
     let firstCreatedAt = null;
     try {
       for (const sid of slotPkIds) {
@@ -148,7 +302,9 @@ bookingsRouter.post(
             user_id: req.auth.user.id,
             slot_id: sid,
             note: note || null,
-            status: "pending"
+            status: "pending",
+            payment_status: "awaiting",
+            payment_expires_at: paymentExpiresAt
           })
           .select("id, status, slot_id, user_id, created_at")
           .single();
@@ -182,6 +338,48 @@ bookingsRouter.post(
 
     const firstRow = sorted[0];
     const lastRow = sorted[sorted.length - 1];
+    const amountVnd = sorted.reduce((sum, row) => sum + Number(row.price_vnd ?? 0), 0);
+    const invoiceNumber = `OBI-${orderId.slice(0, 8).toUpperCase()}-${Date.now()}`;
+    const { successUrl, errorUrl, cancelUrl } = buildPaymentCallbackUrls(orderId);
+    const checkoutForm = buildCheckoutFormResponse({
+      invoiceNumber,
+      amountVnd,
+      successUrl,
+      errorUrl,
+      cancelUrl
+    });
+    const checkoutUrl =
+      env.sepayMerchantId && env.sepayMerchantSecretKey ? buildInternalCheckoutUrl(orderId) : null;
+
+    const fallbackQrUrl =
+      env.sepayBankCode && env.sepayAccountNo
+        ? buildVietQrPreviewUrl({
+            accountNo: env.sepayAccountNo,
+            bankCode: env.sepayBankCode,
+            amountVnd,
+            addInfo: invoiceNumber,
+            accountName: env.sepayAccountName
+          })
+        : null;
+
+    const { error: paymentInsertError } = await supabaseAdminClient.from("payments").insert({
+      order_id: orderId,
+      provider: "sepay_pg",
+      amount_vnd: amountVnd,
+      sepay_order_id: null,
+      invoice_number: invoiceNumber,
+      checkout_url: checkoutUrl,
+      return_success_url: successUrl,
+      return_error_url: errorUrl,
+      return_cancel_url: cancelUrl,
+      status: "awaiting",
+      expires_at: paymentExpiresAt
+    });
+
+    if (paymentInsertError) {
+      await supabaseAdminClient.from("bookings").delete().in("id", createdIds);
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to create payment record");
+    }
 
     return res.status(201).json({
       id: orderId,
@@ -189,10 +387,20 @@ bookingsRouter.post(
       bookingIds: createdIds,
       slotIds: slotPkIds,
       status: "pending",
+      paymentStatus: "awaiting",
       userId: req.auth.user.id,
       createdAt: firstCreatedAt,
       rangeStart: firstRow.start_time,
-      rangeEnd: lastRow.end_time
+      rangeEnd: lastRow.end_time,
+      payment: {
+        invoiceNumber,
+        amountVnd,
+        checkoutUrl,
+        checkoutForm,
+        qrUrl: fallbackQrUrl,
+        expiresAt: paymentExpiresAt,
+        paymentMethod: env.sepayPaymentMethod || "BANK_TRANSFER"
+      }
     });
   })
 );
@@ -201,9 +409,10 @@ bookingsRouter.get(
   "/me",
   requireAuth,
   asyncHandler(async (req, res) => {
+    await expireUnpaidBookings();
     const { data: bookingRows, error: bookingError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, order_id, status, created_at, note, slot_id, cancel_requested_at, cancel_request_note, cancel_request_status")
+      .select("id, order_id, status, payment_status, payment_paid_at, payment_expires_at, created_at, note, slot_id, cancel_requested_at, cancel_request_note, cancel_request_status")
       .eq("user_id", req.auth.user.id)
       .order("created_at", { ascending: false });
 
@@ -274,6 +483,9 @@ bookingsRouter.get(
         orderMap.set(key, {
           id: key,
           status: booking.status,
+          paymentStatus: booking.payment_status || "awaiting",
+          paymentPaidAt: booking.payment_paid_at || null,
+          paymentExpiresAt: booking.payment_expires_at || null,
           createdAt: booking.created_at || null,
           note: booking.note ?? null,
           cancelRequest: {
@@ -281,6 +493,7 @@ bookingsRouter.get(
             requestedAt: booking.cancel_requested_at || null,
             note: booking.cancel_request_note ?? null
           },
+          refundRequest: null,
           slot: {
             id: ts?.id || null,
             startTime: ts?.start_time || null,
@@ -347,15 +560,168 @@ bookingsRouter.get(
       } else {
         existing.status = "cancelled";
       }
+      if (booking.payment_status === "paid" || existing.paymentStatus === "paid") {
+        existing.paymentStatus = "paid";
+      } else if (booking.payment_status === "expired" || existing.paymentStatus === "expired") {
+        existing.paymentStatus = "expired";
+      } else if (booking.payment_status === "refunded" || existing.paymentStatus === "refunded") {
+        existing.paymentStatus = "refunded";
+      } else {
+        existing.paymentStatus = "awaiting";
+      }
     }
 
-    const items = Array.from(orderMap.values()).sort((a, b) => {
+    let items = Array.from(orderMap.values()).sort((a, b) => {
       const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
       const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
       return tb - ta;
     });
 
+    const orderIds = items.map((item) => item.id);
+    if (orderIds.length > 0) {
+      const { data: refundRows, error: refundError } = await fetchRefundRequestRowsByOrderIds(orderIds);
+
+      if (refundError) {
+        return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch refund request details");
+      }
+
+      const refundByOrderId = new Map((refundRows || []).map((row) => [row.order_id, mapRefundRequestRow(row)]));
+      items = items.map((item) => ({
+        ...item,
+        refundRequest: refundByOrderId.get(item.id) || null
+      }));
+    }
+
     return res.status(200).json({ items });
+  })
+);
+
+bookingsRouter.get(
+  "/:bookingId/payment",
+  requireAuth,
+  validateParams(bookingOrderParamsSchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(res, 400, ERROR_CODES.validationError, "Invalid payment detail request");
+    }
+    await expireUnpaidBookings();
+    const { bookingId } = req.validatedParams;
+    const { data: matchedRows, error: matchedError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, order_id")
+      .eq("user_id", req.auth.user.id)
+      .or(`id.eq.${bookingId},order_id.eq.${bookingId}`)
+      .limit(1);
+
+    const matched = matchedRows?.[0];
+    if (matchedError || !matched) {
+      return sendError(res, 404, ERROR_CODES.bookingNotFound, "Booking not found");
+    }
+    const orderId = matched.order_id || matched.id;
+
+    const { data: paymentRow, error: paymentError } = await supabaseAdminClient
+      .from("payments")
+      .select(
+        "order_id, invoice_number, amount_vnd, checkout_url, status, paid_at, expires_at, return_success_url, return_error_url, return_cancel_url"
+      )
+      .eq("order_id", orderId)
+      .maybeSingle();
+
+    if (paymentError || !paymentRow) {
+      return sendError(res, 404, ERROR_CODES.bookingNotFound, "Payment not found");
+    }
+
+    const qrUrl =
+      env.sepayBankCode && env.sepayAccountNo
+        ? buildVietQrPreviewUrl({
+            accountNo: env.sepayAccountNo,
+            bankCode: env.sepayBankCode,
+            amountVnd: Number(paymentRow.amount_vnd || 0),
+            addInfo: paymentRow.invoice_number,
+            accountName: env.sepayAccountName
+          })
+        : null;
+    const checkoutForm = buildCheckoutFormResponse({
+      invoiceNumber: paymentRow.invoice_number,
+      amountVnd: Number(paymentRow.amount_vnd || 0),
+      successUrl: paymentRow.return_success_url || buildPaymentCallbackUrls(orderId).successUrl,
+      errorUrl: paymentRow.return_error_url || buildPaymentCallbackUrls(orderId).errorUrl,
+      cancelUrl: paymentRow.return_cancel_url || buildPaymentCallbackUrls(orderId).cancelUrl
+    });
+
+    return res.status(200).json({
+      id: orderId,
+      payment: {
+        invoiceNumber: paymentRow.invoice_number,
+        amountVnd: Number(paymentRow.amount_vnd || 0),
+        checkoutUrl: paymentRow.checkout_url || buildInternalCheckoutUrl(orderId),
+        hasCheckoutUrl: Boolean(paymentRow.checkout_url || env.sepayMerchantId),
+        checkoutForm,
+        qrUrl,
+        paymentMethod: env.sepayPaymentMethod || "BANK_TRANSFER",
+        status: paymentRow.status,
+        paidAt: paymentRow.paid_at || null,
+        expiresAt: paymentRow.expires_at || null
+      }
+    });
+  })
+);
+
+bookingsRouter.get(
+  "/:bookingId/refund-quote",
+  requireAuth,
+  validateParams(bookingOrderParamsSchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(res, 400, ERROR_CODES.validationError, "Invalid refund quote request");
+    }
+    const { bookingId } = req.validatedParams;
+    const { data: matchedRows, error: matchedError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, order_id")
+      .eq("user_id", req.auth.user.id)
+      .or(`id.eq.${bookingId},order_id.eq.${bookingId}`)
+      .limit(1);
+
+    const matched = matchedRows?.[0];
+    if (matchedError || !matched) {
+      return sendError(res, 404, ERROR_CODES.bookingNotFound, "Booking not found");
+    }
+    const orderId = matched.order_id || matched.id;
+    const orderFilter = matched.order_id ? { column: "order_id", value: matched.order_id } : { column: "id", value: matched.id };
+
+    const { data: rows, error: rowsError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, payment_status, time_slots:slot_id(start_time, price_vnd)")
+      .eq("user_id", req.auth.user.id)
+      .eq(orderFilter.column, orderFilter.value);
+
+    if (rowsError || !rows || rows.length === 0) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booking for refund quote");
+    }
+
+    const paymentStatus = rows[0]?.payment_status || "awaiting";
+    let totalAmountVnd = 0;
+    let startMs = Number.POSITIVE_INFINITY;
+    for (const row of rows) {
+      const slot = Array.isArray(row.time_slots) ? row.time_slots[0] : row.time_slots;
+      totalAmountVnd += Number(slot?.price_vnd ?? 0);
+      if (slot?.start_time) {
+        startMs = Math.min(startMs, new Date(slot.start_time).getTime());
+      }
+    }
+    const feePercent = Number.isFinite(startMs) && Date.now() >= startMs - 24 * 60 * 60 * 1000 ? 30 : 0;
+    const refundAmountVnd = Math.max(0, Math.round(totalAmountVnd * (100 - feePercent) / 100));
+
+    return res.status(200).json({
+      id: orderId,
+      paymentStatus,
+      refundQuote: {
+        totalAmountVnd,
+        feePercent,
+        refundAmountVnd
+      }
+    });
   })
 );
 
@@ -376,10 +742,10 @@ bookingsRouter.post(
     }
 
     const { bookingId } = req.validatedParams;
-    const { note } = req.validatedBody;
+    const { note, refundBankAccount } = req.validatedBody;
     const { data: matchedRows, error: matchedError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, order_id, status, user_id, cancel_requested_at, cancel_request_note, cancel_request_status")
+      .select("id, order_id, status, payment_status, user_id, cancel_requested_at, cancel_request_note, cancel_request_status")
       .eq("user_id", req.auth.user.id)
       .or(`id.eq.${bookingId},order_id.eq.${bookingId}`)
       .limit(1);
@@ -393,7 +759,7 @@ bookingsRouter.post(
     const orderFilter = matched.order_id ? { column: "order_id", value: matched.order_id } : { column: "id", value: matched.id };
     const { data: orderRows, error: orderError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, status, cancel_requested_at, cancel_request_note, cancel_request_status")
+      .select("id, status, payment_status, cancel_requested_at, cancel_request_note, cancel_request_status, time_slots:slot_id(start_time, price_vnd)")
       .eq("user_id", req.auth.user.id)
       .eq(orderFilter.column, orderFilter.value);
 
@@ -410,6 +776,16 @@ bookingsRouter.post(
       );
     }
 
+    const paymentStatus = orderRows[0]?.payment_status || "awaiting";
+    if (paymentStatus === "awaiting" || paymentStatus === "expired") {
+      return sendError(
+        res,
+        409,
+        ERROR_CODES.paymentNotPaid,
+        "Đơn chưa thanh toán nên không thể gửi yêu cầu hoàn tiền"
+      );
+    }
+
     const currentCancelRequest = aggregateCancelRequest(orderRows);
     if (currentCancelRequest.status === "pending") {
       return res.status(200).json({
@@ -419,11 +795,41 @@ bookingsRouter.post(
       });
     }
 
-    const cancelRequestedAt = new Date().toISOString();
+    let totalAmountVnd = 0;
+    let startMs = Number.POSITIVE_INFINITY;
+    for (const row of orderRows) {
+      const slot = Array.isArray(row.time_slots) ? row.time_slots[0] : row.time_slots;
+      totalAmountVnd += Number(slot?.price_vnd ?? 0);
+      if (slot?.start_time) {
+        startMs = Math.min(startMs, new Date(slot.start_time).getTime());
+      }
+    }
+    const feePercent = Number.isFinite(startMs) && Date.now() >= startMs - 24 * 60 * 60 * 1000 ? 30 : 0;
+    const refundAmountVnd = Math.max(0, Math.round(totalAmountVnd * (100 - feePercent) / 100));
+    const normalizedRefundBankAccount = normalizeRefundBankAccount(refundBankAccount);
+    const requestedAt = new Date().toISOString();
+
+    const { error: refundUpsertError } = await upsertRefundRequestWithFallback(
+      {
+        order_id: orderId,
+        total_amount_vnd: totalAmountVnd,
+        fee_percent: feePercent,
+        refund_amount_vnd: refundAmountVnd,
+        status: "pending",
+        note: note || null,
+        requested_at: requestedAt
+      },
+      normalizedRefundBankAccount
+    );
+
+    if (refundUpsertError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to create refund request");
+    }
+
     const { data: updatedRows, error: updateError } = await supabaseAdminClient
       .from("bookings")
       .update({
-        cancel_requested_at: cancelRequestedAt,
+        cancel_requested_at: requestedAt,
         cancel_request_note: note || null,
         cancel_request_status: "pending"
       })
@@ -438,7 +844,17 @@ bookingsRouter.post(
     return res.status(200).json({
       id: orderId,
       updatedCount: (updatedRows || []).length,
-      cancelRequest: aggregateCancelRequest(updatedRows || [])
+      cancelRequest: aggregateCancelRequest(updatedRows || []),
+      refundRequest: {
+        totalAmountVnd,
+        feePercent,
+        refundAmountVnd,
+        status: "pending",
+        requestedAt,
+        decidedAt: null,
+        note: note || null,
+        bankAccount: normalizedRefundBankAccount
+      }
     });
   })
 );

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { parseRefundRequestNote } from "../lib/refundRequestMetadata.js";
 import { supabaseAdminClient } from "../lib/supabase.js";
 import { requireAdmin, requireAuth } from "../middleware/auth.js";
 import { ERROR_CODES } from "../utils/errorCodes.js";
@@ -12,7 +13,7 @@ import {
   validateQuery
 } from "../utils/validate.js";
 import { computeSlotPriceVnd } from "../lib/slotPricing.js";
-import { buildSlotKey, ensureVenueDailySlots } from "../lib/slotAutoSeed.js";
+import { buildSlotKey, ensureVenueDailySlots, insertTimeSlotsSafely, withTimeSlotWriteLock } from "../lib/slotAutoSeed.js";
 import { selectAllPages } from "../lib/supabasePaginate.js";
 
 export const adminRouter = Router();
@@ -44,6 +45,12 @@ const updateBookingBodySchema = z.object({
 });
 const decideCancelRequestBodySchema = z.object({
   decision: z.enum(["approved", "rejected"])
+});
+const refundRequestParamsSchema = z.object({
+  refundRequestId: uuidLikeSchema
+});
+const markRefundedBodySchema = z.object({
+  action: z.literal("mark_refunded")
 });
 const slotParamsSchema = z.object({
   slotId: uuidLikeSchema
@@ -118,6 +125,57 @@ function aggregateCancelRequest(rows) {
   };
 }
 
+function mapRefundRequestRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  const parsedMetadata = parseRefundRequestNote(row.note);
+
+  const hasBankAccount = Boolean(
+    row.beneficiary_bank_name || row.beneficiary_account_number || row.beneficiary_account_name
+  );
+
+  return {
+    id: row.id,
+    totalAmountVnd: Number(row.total_amount_vnd ?? 0),
+    feePercent: Number(row.fee_percent ?? 0),
+    refundAmountVnd: Number(row.refund_amount_vnd ?? 0),
+    status: row.status,
+    requestedAt: row.requested_at || null,
+    decidedAt: row.decided_at || null,
+    note: parsedMetadata.note,
+    bankAccount: hasBankAccount
+      ? {
+          bankName: row.beneficiary_bank_name || "",
+          accountNumber: row.beneficiary_account_number || "",
+          accountHolderName: row.beneficiary_account_name || ""
+        }
+      : parsedMetadata.bankAccount
+  };
+}
+
+function isMissingRefundBankColumnsError(error) {
+  const message = `${error?.message || ""} ${error?.details || ""} ${error?.hint || ""}`;
+  return /beneficiary_(bank_name|account_number|account_name)/i.test(message);
+}
+
+async function fetchRefundRequestRowsByOrderIds(orderIds) {
+  if (!orderIds.length) {
+    return { data: [], error: null };
+  }
+
+  const baseSelect = "id, order_id, total_amount_vnd, fee_percent, refund_amount_vnd, status, requested_at, decided_at, note";
+  const extendedSelect = `${baseSelect}, beneficiary_bank_name, beneficiary_account_number, beneficiary_account_name`;
+
+  let result = await supabaseAdminClient.from("refund_requests").select(extendedSelect).in("order_id", orderIds);
+  if (result.error && isMissingRefundBankColumnsError(result.error)) {
+    result = await supabaseAdminClient.from("refund_requests").select(baseSelect).in("order_id", orderIds);
+  }
+
+  return result;
+}
+
 adminRouter.get(
   "/bookings",
   validateQuery(adminBookingsQuerySchema),
@@ -135,7 +193,7 @@ adminRouter.get(
     const query = supabaseAdminClient
       .from("bookings")
       .select(
-        "id, order_id, status, created_at, user_id, slot_id, cancel_requested_at, cancel_request_note, cancel_request_status, profiles:user_id(full_name), time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venue_id, venues:venue_id(name, address)))"
+        "id, order_id, status, payment_status, created_at, user_id, slot_id, cancel_requested_at, cancel_request_note, cancel_request_status, profiles:user_id(full_name), time_slots:slot_id(start_time, end_time, price_vnd, fields:field_id(name, venue_id, venues:venue_id(name, address)))"
       );
 
     const { data, error } = await query.order("created_at", { ascending: false });
@@ -165,6 +223,8 @@ adminRouter.get(
             requestedAt: item.cancel_requested_at || null,
             note: item.cancel_request_note || null
           },
+          paymentStatus: item.payment_status || "awaiting",
+          refundRequest: null,
           slotStartTime: timeSlot?.start_time || null,
           slotEndTime: timeSlot?.end_time || null,
           fieldName: field?.name || "",
@@ -221,6 +281,15 @@ adminRouter.get(
       } else {
         existing.status = "cancelled";
       }
+      if (item.payment_status === "paid" || existing.paymentStatus === "paid") {
+        existing.paymentStatus = "paid";
+      } else if (item.payment_status === "expired" || existing.paymentStatus === "expired") {
+        existing.paymentStatus = "expired";
+      } else if (item.payment_status === "refunded" || existing.paymentStatus === "refunded") {
+        existing.paymentStatus = "refunded";
+      } else {
+        existing.paymentStatus = "awaiting";
+      }
     }
 
     let items = Array.from(grouped.values()).sort((a, b) => {
@@ -240,6 +309,20 @@ adminRouter.get(
     }
     if (status) {
       items = items.filter((item) => item.status === status);
+    }
+
+    const orderIds = items.map((item) => item.id);
+    if (orderIds.length > 0) {
+      const { data: refundRows, error: refundError } = await fetchRefundRequestRowsByOrderIds(orderIds);
+      if (refundError) {
+        return sendError(res, 500, ERROR_CODES.dbError, "Failed to fetch admin refund requests");
+      }
+
+      const refundByOrderId = new Map((refundRows || []).map((row) => [row.order_id, row]));
+      items = items.map((item) => ({
+        ...item,
+        refundRequest: mapRefundRequestRow(refundByOrderId.get(item.id))
+      }));
     }
 
     return res.status(200).json({ items });
@@ -311,12 +394,69 @@ adminRouter.patch(
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to process booking cancel request");
     }
 
+    const { error: refundUpdateError } = await supabaseAdminClient
+      .from("refund_requests")
+      .update({
+        status: decision === "approved" ? "approved" : "rejected",
+        decided_at: new Date().toISOString()
+      })
+      .eq("order_id", orderId);
+
+    if (refundUpdateError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to update refund request");
+    }
+
     const first = (updatedRows || [])[0];
     return res.status(200).json({
       id: orderId,
       updatedCount: (updatedRows || []).length,
       status: first?.status || (decision === "approved" ? "cancelled" : null),
       cancelRequest: aggregateCancelRequest(updatedRows || [])
+    });
+  })
+);
+
+adminRouter.patch(
+  "/refund-requests/:refundRequestId",
+  validateParams(refundRequestParamsSchema),
+  validateBody(markRefundedBodySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(res, 400, ERROR_CODES.validationError, "Invalid refund request action", {
+        fields: req.validationError
+      });
+    }
+
+    const { refundRequestId } = req.validatedParams;
+    const { data: row, error: readError } = await supabaseAdminClient
+      .from("refund_requests")
+      .select("id, order_id, status")
+      .eq("id", refundRequestId)
+      .maybeSingle();
+
+    if (readError || !row) {
+      return sendError(res, 404, ERROR_CODES.notFound, "Refund request not found");
+    }
+
+    const { error: updateError } = await supabaseAdminClient
+      .from("refund_requests")
+      .update({ status: "refunded", decided_at: new Date().toISOString() })
+      .eq("id", refundRequestId);
+
+    if (updateError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to mark refund as completed");
+    }
+
+    await supabaseAdminClient
+      .from("bookings")
+      .update({ payment_status: "refunded" })
+      .eq("order_id", row.order_id);
+    await supabaseAdminClient.from("payments").update({ status: "refunded" }).eq("order_id", row.order_id);
+
+    return res.status(200).json({
+      id: refundRequestId,
+      orderId: row.order_id,
+      status: "refunded"
     });
   })
 );
@@ -356,7 +496,7 @@ adminRouter.patch(
 
     const { data: rowsInOrder, error: orderReadError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, status")
+      .select("id, status, payment_status")
       .eq(orderFilter.column, orderFilter.value);
 
     if (orderReadError || !rowsInOrder || rowsInOrder.length === 0) {
@@ -372,14 +512,32 @@ adminRouter.patch(
       );
     }
 
+    if (status === "confirmed" && rowsInOrder.some((row) => row.payment_status !== "paid")) {
+      return sendError(
+        res,
+        409,
+        ERROR_CODES.paymentNotPaid,
+        "Chỉ có thể xác nhận đơn đã thanh toán"
+      );
+    }
+
+    const updatePayload =
+      status === "cancelled" && rowsInOrder.every((row) => row.payment_status === "awaiting")
+        ? { status, payment_status: "expired" }
+        : { status };
+
     const { data, error } = await supabaseAdminClient
       .from("bookings")
-      .update({ status })
+      .update(updatePayload)
       .eq(orderFilter.column, orderFilter.value)
       .select("id, status, slot_id, user_id, created_at, order_id");
 
     if (error) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to update booking");
+    }
+
+    if (status === "cancelled" && rowsInOrder.every((row) => row.payment_status === "awaiting")) {
+      await supabaseAdminClient.from("payments").update({ status: "expired" }).eq("order_id", orderId);
     }
 
     const first = (data || [])[0];
@@ -606,69 +764,79 @@ adminRouter.post(
       );
     }
 
-    const rangeStart = localTimestamp(fromDate, "00:00");
-    const rangeEnd = localTimestamp(toDate, "23:59");
-    const { data: existing, error: existingError } = await supabaseAdminClient
-      .from("time_slots")
-      .select("id, start_time, end_time")
-      .eq("field_id", fieldId)
-      .gte("start_time", rangeStart)
-      .lte("start_time", rangeEnd);
+    return withTimeSlotWriteLock(
+      `field:${fieldId}|from:${fromDate}|to:${toDate}|slotMinutes:${slotMinutes}|window:${dailyStart}-${dailyEnd}`,
+      async () => {
+        const rangeStart = localTimestamp(fromDate, "00:00");
+        const rangeEnd = localTimestamp(toDate, "23:59");
+        const { data: existing, error: existingError } = await supabaseAdminClient
+          .from("time_slots")
+          .select("id, start_time, end_time")
+          .eq("field_id", fieldId)
+          .gte("start_time", rangeStart)
+          .lte("start_time", rangeEnd);
 
-    if (existingError) {
-      return sendError(res, 500, ERROR_CODES.dbError, "Failed to read existing slots");
-    }
-
-    const existingKeys = new Set((existing || []).map((slot) => buildSlotKey(fieldId, slot.start_time, slot.end_time)));
-    const rowsToInsert = [];
-    let cursorDate = new Date(`${fromDate}T00:00:00Z`);
-    const endDate = new Date(`${toDate}T00:00:00Z`);
-    let skippedCount = 0;
-
-    while (cursorDate <= endDate) {
-      const dateStr = cursorDate.toISOString().slice(0, 10);
-      for (
-        let start = startMinutes;
-        start + slotMinutes <= endMinutes;
-        start += slotMinutes
-      ) {
-        const end = start + slotMinutes;
-        const startHm = formatHmFromMinutes(start);
-        const endHm = formatHmFromMinutes(end);
-        const startTs = localTimestamp(dateStr, startHm);
-        const endTs = localTimestamp(dateStr, endHm);
-        const key = buildSlotKey(fieldId, startTs, endTs);
-
-        if (existingKeys.has(key)) {
-          skippedCount += 1;
-          continue;
+        if (existingError) {
+          return sendError(res, 500, ERROR_CODES.dbError, "Failed to read existing slots");
         }
-        existingKeys.add(key);
-        rowsToInsert.push({
-          field_id: fieldId,
-          start_time: startTs,
-          end_time: endTs,
-          status: "available",
-          price_vnd: computeSlotPriceVnd(startTs, endTs)
+
+        const existingKeys = new Set(
+          (existing || []).map((slot) => buildSlotKey(fieldId, slot.start_time, slot.end_time))
+        );
+        const rowsToInsert = [];
+        let cursorDate = new Date(`${fromDate}T00:00:00Z`);
+        const endDate = new Date(`${toDate}T00:00:00Z`);
+        let skippedCount = 0;
+
+        while (cursorDate <= endDate) {
+          const dateStr = cursorDate.toISOString().slice(0, 10);
+          for (
+            let start = startMinutes;
+            start + slotMinutes <= endMinutes;
+            start += slotMinutes
+          ) {
+            const end = start + slotMinutes;
+            const startHm = formatHmFromMinutes(start);
+            const endHm = formatHmFromMinutes(end);
+            const startTs = localTimestamp(dateStr, startHm);
+            const endTs = localTimestamp(dateStr, endHm);
+            const key = buildSlotKey(fieldId, startTs, endTs);
+
+            if (existingKeys.has(key)) {
+              skippedCount += 1;
+              continue;
+            }
+            existingKeys.add(key);
+            rowsToInsert.push({
+              field_id: fieldId,
+              start_time: startTs,
+              end_time: endTs,
+              status: "available",
+              price_vnd: computeSlotPriceVnd(startTs, endTs)
+            });
+          }
+          cursorDate.setUTCDate(cursorDate.getUTCDate() + 1);
+        }
+
+        let createdCount = 0;
+        if (rowsToInsert.length > 0) {
+          const { error: insertError, insertedCount } = await insertTimeSlotsSafely(supabaseAdminClient, rowsToInsert);
+          if (insertError) {
+            return sendError(res, 500, ERROR_CODES.dbError, "Failed to create slots in bulk");
+          }
+          createdCount = insertedCount;
+          skippedCount += Math.max(rowsToInsert.length - insertedCount, 0);
+        }
+
+        return res.status(200).json({
+          fieldId,
+          fromDate,
+          toDate,
+          createdCount,
+          skippedCount
         });
       }
-      cursorDate.setUTCDate(cursorDate.getUTCDate() + 1);
-    }
-
-    if (rowsToInsert.length > 0) {
-      const { error: insertError } = await supabaseAdminClient.from("time_slots").insert(rowsToInsert);
-      if (insertError) {
-        return sendError(res, 500, ERROR_CODES.dbError, "Failed to create slots in bulk");
-      }
-    }
-
-    return res.status(200).json({
-      fieldId,
-      fromDate,
-      toDate,
-      createdCount: rowsToInsert.length,
-      skippedCount
-    });
+    );
   })
 );
 
