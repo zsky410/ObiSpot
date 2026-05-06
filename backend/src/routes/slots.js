@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { supabaseAdminClient } from "../lib/supabase.js";
-import { buildSlotKey, ensureVenueDailySlots, isDateInRollingWindow } from "../lib/slotAutoSeed.js";
+import { buildSlotKey, ensureVenueDailySlots } from "../lib/slotAutoSeed.js";
 import { selectAllPages } from "../lib/supabasePaginate.js";
 import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
@@ -29,15 +29,13 @@ slotsRouter.get(
       );
     }
     const { date, venueId, pitchFormat } = req.validatedQuery;
-    if (isDateInRollingWindow(date, 5)) {
-      await ensureVenueDailySlots(supabaseAdminClient, {
-        venueId,
-        date,
-        slotMinutes: 30,
-        dailyStart: "05:00",
-        dailyEnd: "23:00"
-      });
-    }
+    await ensureVenueDailySlots(supabaseAdminClient, {
+      venueId,
+      date,
+      slotMinutes: 30,
+      dailyStart: "05:00",
+      dailyEnd: "23:00"
+    });
 
     const rangeStart = new Date(`${date}T05:00:00+07:00`).toISOString();
     const rangeEndExclusive = new Date(`${date}T23:00:00+07:00`).toISOString();

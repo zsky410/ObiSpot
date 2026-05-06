@@ -147,6 +147,11 @@ export type MyBooking = {
   status: "pending" | "confirmed" | "cancelled";
   createdAt: string | null;
   note: string | null;
+  cancelRequest: {
+    status: "pending" | "approved" | "rejected" | null;
+    requestedAt: string | null;
+    note: string | null;
+  };
   slot: {
     id: string | null;
     startTime: string | null;
@@ -200,5 +205,21 @@ export async function createBookingApi(token: string, slotIds: string[], note?: 
 export async function getMyBookingsApi(token: string) {
   return apiRequest<{ items: MyBooking[] }>("/bookings/me", {
     token
+  });
+}
+
+export async function requestBookingCancelApi(token: string, bookingId: string, note?: string) {
+  return apiRequest<{
+    id: string;
+    updatedCount: number;
+    cancelRequest: {
+      status: "pending" | "approved" | "rejected" | null;
+      requestedAt: string | null;
+      note: string | null;
+    };
+  }>(`/bookings/${bookingId}/cancel-request`, {
+    method: "POST",
+    token,
+    body: { note: note || null }
   });
 }

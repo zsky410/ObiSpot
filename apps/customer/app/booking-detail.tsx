@@ -1,13 +1,14 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { router, useLocalSearchParams } from "expo-router";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { ImagePlaceholder } from "../src/components/ImagePlaceholder";
 import { pitchImageByKey } from "../src/lib/pitchImages";
-import { ApiRequestError, getMyBookingsApi } from "../src/lib/api";
+import { ApiRequestError, getMyBookingsApi, requestBookingCancelApi } from "../src/lib/api";
 import { useAuth } from "../src/store/auth";
 
 export default function BookingDetailScreen() {
+  const queryClient = useQueryClient();
   const { token, bootstrapped, getValidAccessToken, user } = useAuth();
   const params = useLocalSearchParams<{ bookingId?: string }>();
 
@@ -24,8 +25,42 @@ export default function BookingDetailScreen() {
   });
 
   const booking = (bookingsQuery.data?.items || []).find((item) => item.id === params.bookingId) || bookingsQuery.data?.items?.[0];
-  const statusMeta = getStatusMeta(booking?.status);
+  const statusMeta = getStatusMeta(booking);
   const heroImageKey = booking?.venue.id || params.bookingId || "booking";
+  const cancelMutation = useMutation({
+    mutationFn: async () => {
+      const accessToken = await getValidAccessToken();
+      if (!accessToken || !booking?.id) {
+        throw new Error("Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.");
+      }
+      return requestBookingCancelApi(accessToken, booking.id);
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["my-bookings"] });
+      Alert.alert("Đã gửi yêu cầu", "Yêu cầu hủy sân đã được gửi tới admin để xác nhận.");
+    },
+    onError: (error) => {
+      Alert.alert("Không thể gửi yêu cầu", error instanceof Error ? error.message : "Vui lòng thử lại sau.");
+    }
+  });
+  const canRequestCancel =
+    !!booking &&
+    booking.status !== "cancelled" &&
+    booking.cancelRequest.status !== "pending";
+
+  function handleCancelRequest() {
+    if (!canRequestCancel) {
+      return;
+    }
+    Alert.alert(
+      "Yêu cầu hủy đơn",
+      "Yêu cầu hủy sẽ được gửi tới admin để xác nhận. Bạn có muốn tiếp tục không?",
+      [
+        { text: "Để sau", style: "cancel" },
+        { text: "Gửi yêu cầu", style: "destructive", onPress: () => cancelMutation.mutate() }
+      ]
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -87,17 +122,58 @@ export default function BookingDetailScreen() {
           <Text style={styles.rule}>• Hủy trước 24h: Miễn phí.</Text>
           <Text style={styles.rule}>• Hủy trong vòng 24h: Có thể bị phạt phí quản lý.</Text>
           <Text style={styles.rule}>• Liên hệ trực tiếp chủ sân nếu có thay đổi gấp.</Text>
+          {booking?.cancelRequest.status === "pending" ? (
+            <View style={styles.cancelRequestBox}>
+              <Text style={styles.cancelRequestTitle}>Yêu cầu hủy đang chờ admin xác nhận</Text>
+              <Text style={styles.cancelRequestText}>
+                {booking.cancelRequest.requestedAt
+                  ? `Đã gửi lúc ${formatDateTime(booking.cancelRequest.requestedAt)}.`
+                  : "Yêu cầu đã được gửi."}
+              </Text>
+            </View>
+          ) : null}
         </View>
 
-        <Pressable style={styles.cancelBtn}>
-          <Text style={styles.cancelBtnText}>YÊU CẦU HỦY ĐƠN</Text>
+        <Pressable
+          style={[
+            styles.cancelBtn,
+            (!canRequestCancel || cancelMutation.isPending) && styles.cancelBtnDisabled
+          ]}
+          disabled={!canRequestCancel || cancelMutation.isPending}
+          onPress={handleCancelRequest}
+        >
+          <Text style={[styles.cancelBtnText, (!canRequestCancel || cancelMutation.isPending) && styles.cancelBtnTextDisabled]}>
+            {booking?.status === "cancelled"
+              ? "ĐƠN ĐÃ HỦY"
+              : booking?.cancelRequest.status === "pending"
+                ? "ĐÃ GỬI YÊU CẦU HỦY"
+                : cancelMutation.isPending
+                  ? "ĐANG GỬI YÊU CẦU..."
+                  : "YÊU CẦU HỦY ĐƠN"}
+          </Text>
         </Pressable>
       </ScrollView>
     </SafeAreaView>
   );
 }
 
-function getStatusMeta(status?: "pending" | "confirmed" | "cancelled") {
+function getStatusMeta(
+  booking?:
+    | {
+        status: "pending" | "confirmed" | "cancelled";
+        cancelRequest: { status: "pending" | "approved" | "rejected" | null };
+      }
+    | undefined
+) {
+  if (booking?.cancelRequest.status === "pending") {
+    return {
+      icon: "🟠",
+      label: "Đang chờ duyệt hủy",
+      description: "Yêu cầu hủy đã được gửi tới admin và đang chờ xác nhận.",
+      color: "#B86800"
+    };
+  }
+  const status = booking?.status;
   if (status === "confirmed") {
     return {
       icon: "🟢",
@@ -151,6 +227,18 @@ function formatPrice(value?: number) {
   return new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND" }).format(price);
 }
 
+function formatDateTime(value?: string | null) {
+  if (!value) return "--";
+  return new Date(value).toLocaleString("vi-VN", {
+    timeZone: "Asia/Ho_Chi_Minh",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
 function MetaItem({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.metaItem}>
@@ -197,6 +285,19 @@ const styles = StyleSheet.create({
   rowTotal: { color: "#068F61", fontSize: 24, fontWeight: "900" },
   policy: { color: "#607287", marginTop: 2 },
   rule: { color: "#607287" },
+  cancelRequestBox: {
+    marginTop: 6,
+    borderRadius: 10,
+    backgroundColor: "#FFF3E0",
+    borderWidth: 1,
+    borderColor: "#F2D6A8",
+    padding: 10,
+    gap: 4
+  },
+  cancelRequestTitle: { color: "#9A5700", fontWeight: "800" },
+  cancelRequestText: { color: "#7A5B2B" },
   cancelBtn: { borderWidth: 1, borderColor: "#E9B4B4", borderRadius: 12, paddingVertical: 14, alignItems: "center" },
-  cancelBtnText: { color: "#D24545", fontWeight: "800" }
+  cancelBtnDisabled: { borderColor: "#D9E0EA", backgroundColor: "#F4F6FA" },
+  cancelBtnText: { color: "#D24545", fontWeight: "800" },
+  cancelBtnTextDisabled: { color: "#8B98A8" }
 });

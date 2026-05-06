@@ -79,6 +79,11 @@ export type AdminBooking = {
   userId: string;
   customerName: string;
   slotId: string;
+  cancelRequest: {
+    status: "pending" | "approved" | "rejected" | null;
+    requestedAt: string | null;
+    note: string | null;
+  };
   slotStartTime: string | null;
   slotEndTime: string | null;
   fieldName: string;
@@ -87,6 +92,10 @@ export type AdminBooking = {
   venueAddress?: string;
   totalPrice?: number;
   slotCount?: number;
+};
+
+type AdminBookingsResponse = {
+  items: Array<Partial<AdminBooking> & Pick<AdminBooking, "id" | "status" | "createdAt" | "userId" | "customerName" | "slotId" | "slotStartTime" | "slotEndTime" | "fieldName">>;
 };
 
 export type AdminSlot = {
@@ -98,6 +107,9 @@ export type AdminSlot = {
   status: "available" | "blocked" | "booked";
   bookingStatus?: "pending" | "confirmed" | null;
   bookingGroupId?: string | null;
+  availableSlotIds: string[];
+  blockedSlotIds: string[];
+  bookedSlotIds: string[];
 };
 
 export type AdminSlotBookingDetail = {
@@ -170,7 +182,22 @@ export async function getAdminBookingsApi(token: string, date?: string, status?:
   const q = new URLSearchParams();
   if (date) q.set("date", date);
   if (status && status !== "all") q.set("status", status);
-  return apiRequest<{ items: AdminBooking[] }>(`/admin/bookings${q.size ? `?${q.toString()}` : ""}`, { token });
+  const data = await apiRequest<AdminBookingsResponse>(`/admin/bookings${q.size ? `?${q.toString()}` : ""}`, { token });
+  return {
+    items: (data.items || []).map((item) => ({
+      ...item,
+      venueId: item.venueId ?? null,
+      venueName: item.venueName ?? "",
+      venueAddress: item.venueAddress ?? "",
+      totalPrice: item.totalPrice ?? 0,
+      slotCount: item.slotCount ?? 1,
+      cancelRequest: {
+        status: item.cancelRequest?.status ?? null,
+        requestedAt: item.cancelRequest?.requestedAt ?? null,
+        note: item.cancelRequest?.note ?? null
+      }
+    })) as AdminBooking[]
+  };
 }
 
 export async function patchAdminBookingStatusApi(token: string, bookingId: string, status: "confirmed" | "cancelled") {
@@ -178,6 +205,27 @@ export async function patchAdminBookingStatusApi(token: string, bookingId: strin
     method: "PATCH",
     token,
     body: { status }
+  });
+}
+
+export async function patchAdminBookingCancelRequestApi(
+  token: string,
+  bookingId: string,
+  decision: "approved" | "rejected"
+) {
+  return apiRequest<{
+    id: string;
+    updatedCount: number;
+    status: string | null;
+    cancelRequest: {
+      status: "pending" | "approved" | "rejected" | null;
+      requestedAt: string | null;
+      note: string | null;
+    };
+  }>(`/admin/bookings/${bookingId}/cancel-request`, {
+    method: "PATCH",
+    token,
+    body: { decision }
   });
 }
 

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   type AdminSlot,
   type AdminSlotBookingDetail,
@@ -48,6 +48,10 @@ const SLOT_ACTION_COPY: Record<
   }
 };
 
+function uniqueIds(ids: string[]) {
+  return Array.from(new Set(ids));
+}
+
 export function SlotsPage() {
   const { getValidAccessToken } = useAuth();
   const queryClient = useQueryClient();
@@ -57,10 +61,12 @@ export function SlotsPage() {
   const [actionMode, setActionMode] = useState<"block" | "unblock" | "reserve">("block");
   const [selectedCellKeys, setSelectedCellKeys] = useState<string[]>([]);
   const [activeBookedSlotId, setActiveBookedSlotId] = useState<string | null>(null);
+  const hiddenDateInputRef = useRef<HTMLInputElement | null>(null);
 
   const venuesQuery = useQuery({
     queryKey: ["venues"],
-    queryFn: getVenuesApi
+    queryFn: getVenuesApi,
+    staleTime: 5 * 60 * 1000
   });
 
   const slotsQuery = useQuery({
@@ -80,7 +86,8 @@ export function SlotsPage() {
       const token = await getValidAccessToken();
       if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
       return getAdminFieldsApi(token, expandedVenueId);
-    }
+    },
+    staleTime: 5 * 60 * 1000
   });
   const bookedSlotDetailQuery = useQuery({
     queryKey: ["admin-slot-booking-detail", activeBookedSlotId],
@@ -96,8 +103,6 @@ export function SlotsPage() {
   const venues = venuesQuery.data?.items || [];
   const actionCopy = SLOT_ACTION_COPY[actionMode];
   const dateLabel = useMemo(() => formatDateLabel(date), [date]);
-  const todayValue = useMemo(() => getVietnamDateInputValue(new Date()), []);
-  const tomorrowValue = useMemo(() => shiftDateValue(todayValue, 1), [todayValue]);
 
   const toggleMutation = useMutation({
     mutationFn: async (payload: { slotIds: string[]; nextStatus: "available" | "blocked" }) => {
@@ -114,9 +119,37 @@ export function SlotsPage() {
         const idSet = new Set(payload.slotIds);
         return {
           ...old,
-          items: old.items.map((slot) =>
-            idSet.has(slot.id) && slot.status !== "booked" ? { ...slot, status: payload.nextStatus } : slot
-          )
+          items: old.items.map((slot) => {
+            if (slot.status === "booked") return slot;
+
+            const availableSlotIds = slot.availableSlotIds || [];
+            const blockedSlotIds = slot.blockedSlotIds || [];
+            const touchesAvailable = availableSlotIds.some((id) => idSet.has(id));
+            const touchesBlocked = blockedSlotIds.some((id) => idSet.has(id));
+
+            if (payload.nextStatus === "blocked" && touchesAvailable) {
+              const movedIds = availableSlotIds.filter((id) => idSet.has(id));
+              return {
+                ...slot,
+                status: "blocked" as const,
+                availableSlotIds: availableSlotIds.filter((id) => !idSet.has(id)),
+                blockedSlotIds: uniqueIds([...blockedSlotIds, ...movedIds])
+              };
+            }
+
+            if (payload.nextStatus === "available" && touchesBlocked) {
+              const movedIds = blockedSlotIds.filter((id) => idSet.has(id));
+              const nextBlockedIds = blockedSlotIds.filter((id) => !idSet.has(id));
+              return {
+                ...slot,
+                status: nextBlockedIds.length ? "blocked" as const : "available" as const,
+                availableSlotIds: uniqueIds([...availableSlotIds, ...movedIds]),
+                blockedSlotIds: nextBlockedIds
+              };
+            }
+
+            return slot;
+          })
         };
       });
       return { previous, key };
@@ -125,6 +158,9 @@ export function SlotsPage() {
       if (ctx?.previous) {
         queryClient.setQueryData(ctx.key, ctx.previous);
       }
+    },
+    onSettled: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["admin-slots", date, expandedVenueId] });
     }
   });
 
@@ -170,11 +206,15 @@ export function SlotsPage() {
           bookingGroupIds: []
         };
         if (slot.status === "booked") {
-          current.bookedIds.push(slot.id);
+          current.bookedIds.push(...(slot.bookedSlotIds?.length ? slot.bookedSlotIds : [slot.id]));
           if (slot.bookingGroupId) current.bookingGroupIds.push(slot.bookingGroupId);
         }
-        else if (slot.status === "blocked") current.blockedIds.push(slot.id);
-        else current.availableIds.push(slot.id);
+        else if (slot.status === "blocked") {
+          current.blockedIds.push(...(slot.blockedSlotIds?.length ? slot.blockedSlotIds : [slot.id]));
+        }
+        else {
+          current.availableIds.push(...(slot.availableSlotIds?.length ? slot.availableSlotIds : [slot.id]));
+        }
         map.set(key, current);
       }
     }
@@ -186,7 +226,14 @@ export function SlotsPage() {
           : value.availableIds.length
             ? "available"
             : "none";
-      map.set(key, { ...value, status });
+      map.set(key, {
+        ...value,
+        status,
+        availableIds: uniqueIds(value.availableIds),
+        blockedIds: uniqueIds(value.blockedIds),
+        bookedIds: uniqueIds(value.bookedIds),
+        bookingGroupIds: uniqueIds(value.bookingGroupIds)
+      });
     }
     return map;
   }, [slotsQuery.data?.items, timelineLabels, date]);
@@ -272,6 +319,15 @@ export function SlotsPage() {
     setDate(nextDate);
     setSelectedCellKeys([]);
     setActiveBookedSlotId(null);
+  }
+
+  function openDatePicker() {
+    if (!hiddenDateInputRef.current) return;
+    if (typeof hiddenDateInputRef.current.showPicker === "function") {
+      hiddenDateInputRef.current.showPicker();
+      return;
+    }
+    hiddenDateInputRef.current.click();
   }
 
   function handleVenueChange(nextVenueId: string) {
@@ -371,30 +427,40 @@ export function SlotsPage() {
   return (
     <section className="slot-page">
       <div className="card slot-control-card">
-        <div className="slot-control-top">
-          <div>
-            <h4>Bộ lọc và thao tác</h4>
-          </div>
-          <div className="slot-control-status">
-            <span className={`slot-action-pill slot-action-pill-${actionMode}`}>{actionCopy.label}</span>
-            <span className="slot-selected-count">{selectedCellKeys.length} ô đã chọn</span>
-          </div>
-        </div>
-
         <div className="slot-filter-grid">
-          <label className="input-col slot-input-card">
+          <label className="input-col slot-input-card slot-input-card-date">
             <span>Ngày vận hành</span>
+            <div className="slot-date-display-wrap">
+              <input
+                type="text"
+                value={dateLabel}
+                readOnly
+                onClick={openDatePicker}
+                aria-label="Ngày vận hành"
+              />
+              <button
+                type="button"
+                className="slot-date-display-btn"
+                onClick={openDatePicker}
+                aria-label="Chọn ngày vận hành"
+              >
+                <span className="slot-date-display-icon" aria-hidden="true" />
+              </button>
+            </div>
             <input
+              ref={hiddenDateInputRef}
               type="date"
               value={date}
               onChange={(e) => {
                 handleDateChange(e.target.value);
               }}
+              className="slot-date-native-input"
+              aria-hidden="true"
+              tabIndex={-1}
             />
-            <small>{dateLabel}</small>
           </label>
 
-          <label className="input-col slot-input-card">
+          <label className="input-col slot-input-card slot-input-card-venue">
             <span>Chi nhánh</span>
             <select
               value={expandedVenueId}
@@ -411,7 +477,7 @@ export function SlotsPage() {
             </select>
           </label>
 
-          <label className="input-col slot-input-card">
+          <label className="input-col slot-input-card slot-input-card-field">
             <span>Lọc theo sân</span>
             <select
               value={fieldFilter}
@@ -429,7 +495,7 @@ export function SlotsPage() {
             </select>
           </label>
 
-          <label className="input-col slot-input-card">
+          <label className="input-col slot-input-card slot-input-card-action">
             <span>Thao tác hàng loạt</span>
             <select value={actionMode} onChange={(e) => setActionMode(e.target.value as typeof actionMode)}>
               <option value="block">Khóa slot</option>
@@ -440,21 +506,9 @@ export function SlotsPage() {
         </div>
 
         <div className="slot-control-footer">
-          <div className="slot-shortcut-row">
-            <button
-              type="button"
-              className={`slot-quick-btn ${date === todayValue ? "active" : ""}`}
-              onClick={() => handleDateChange(todayValue)}
-            >
-              Hôm nay
-            </button>
-            <button
-              type="button"
-              className={`slot-quick-btn ${date === tomorrowValue ? "active" : ""}`}
-              onClick={() => handleDateChange(tomorrowValue)}
-            >
-              Ngày mai
-            </button>
+          <div className="slot-control-status">
+            <span className={`slot-action-pill slot-action-pill-${actionMode}`}>{actionCopy.label}</span>
+            <span className="slot-selected-count">{selectedCellKeys.length} ô đã chọn</span>
           </div>
           <button
             className="btn slot-apply-btn"
@@ -517,9 +571,6 @@ export function SlotsPage() {
                     ) : (
                       <>
                         <div className="slot-timeline-legend">
-                          <span>
-                            <i className="legend-dot legend-none" /> Chưa tạo slot
-                          </span>
                           <span>
                             <i className="legend-dot legend-available" /> Slot trống
                           </span>
@@ -768,15 +819,6 @@ function getVietnamDateInputValue(date: Date) {
   const month = parts.find((part) => part.type === "month")?.value || "01";
   const day = parts.find((part) => part.type === "day")?.value || "01";
   return `${year}-${month}-${day}`;
-}
-
-function shiftDateValue(dateValue: string, days: number) {
-  const [year, month, day] = dateValue.split("-").map(Number);
-  const next = new Date(Date.UTC(year, month - 1, day + days));
-  const nextYear = next.getUTCFullYear();
-  const nextMonth = `${next.getUTCMonth() + 1}`.padStart(2, "0");
-  const nextDay = `${next.getUTCDate()}`.padStart(2, "0");
-  return `${nextYear}-${nextMonth}-${nextDay}`;
 }
 
 function formatDateLabel(dateValue: string) {

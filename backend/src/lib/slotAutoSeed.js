@@ -1,4 +1,5 @@
 import { computeSlotPriceVnd } from "./slotPricing.js";
+import { selectAllPages } from "./supabasePaginate.js";
 
 const VN_TIMEZONE = "Asia/Ho_Chi_Minh";
 
@@ -84,30 +85,37 @@ export async function ensureVenueDailySlots(
   const fieldIds = fields.map((f) => f.id);
   const rangeStart = localTimestamp(date, dailyStart);
   const rangeEnd = localTimestamp(date, dailyEnd); // exclusive
-  const { data: existing, error: existingError } = await supabaseAdminClient
-    .from("time_slots")
-    .select("field_id, start_time, end_time")
-    .in("field_id", fieldIds)
-    .gte("start_time", rangeStart)
-    .lt("start_time", rangeEnd);
+  const { data: existing, error: existingError } = await selectAllPages(
+    () =>
+      supabaseAdminClient
+        .from("time_slots")
+        .select("field_id, start_time, end_time")
+        .in("field_id", fieldIds)
+        .gte("start_time", rangeStart)
+        .lt("start_time", rangeEnd)
+        .order("field_id", { ascending: true })
+        .order("start_time", { ascending: true })
+        .order("end_time", { ascending: true }),
+    { pageSize: 2000 }
+  );
 
   if (existingError) {
     return { createdCount: 0 };
   }
 
   const expectedStartCount = Math.floor((endMinutes - startMinutes) / slotMinutes);
+  const existingKeys = new Set();
   const countsByField = new Map(fieldIds.map((id) => [id, 0]));
   for (const slot of existing || []) {
+    const key = buildSlotKey(slot.field_id, slot.start_time, slot.end_time);
+    if (existingKeys.has(key)) continue;
+    existingKeys.add(key);
     countsByField.set(slot.field_id, (countsByField.get(slot.field_id) || 0) + 1);
   }
   const hasAllExpectedForAllFields = fieldIds.every((id) => (countsByField.get(id) || 0) >= expectedStartCount);
   if (hasAllExpectedForAllFields) {
     return { createdCount: 0 };
   }
-
-  const existingKeys = new Set(
-    (existing || []).map((slot) => buildSlotKey(slot.field_id, slot.start_time, slot.end_time))
-  );
 
   const rowsToInsert = [];
   for (const fieldId of fieldIds) {

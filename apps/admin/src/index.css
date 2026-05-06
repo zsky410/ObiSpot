@@ -39,7 +39,8 @@ p {
 .layout-root {
   display: grid;
   grid-template-columns: 224px 1fr;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -49,6 +50,9 @@ p {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
 }
 
 .brand-block {
@@ -159,6 +163,7 @@ p {
 
 .content {
   background: var(--bg-app);
+  overflow: auto;
 }
 
 .topbar {
@@ -251,6 +256,12 @@ section {
   display: grid;
   place-items: center;
   color: #3f5873;
+}
+
+.runtime-error-card {
+  width: min(560px, calc(100vw - 32px));
+  display: grid;
+  gap: 12px;
 }
 
 .btn {
@@ -347,6 +358,19 @@ td {
 .table-actions {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.booking-status-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  justify-content: center;
+  text-align: left;
+  width: 100%;
 }
 
 .bookings-card {
@@ -389,12 +413,16 @@ td {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  justify-content: center;
+  height: 100%;
 }
 
 .booking-time-cell {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  justify-content: center;
+  height: 100%;
 }
 
 /* Bookings table: chỉ nhấn mạnh mã đơn + giá; còn lại trọng số nhẹ */
@@ -408,15 +436,15 @@ td {
 
 .bookings-data-table td {
   vertical-align: middle;
-  padding-top: 12px;
-  padding-bottom: 12px;
+  padding-top: 14px;
+  padding-bottom: 14px;
 }
 
-/* Cột nhiều dòng: căn trên cho khớp block text */
-.bookings-data-table td:nth-child(4),
-.bookings-data-table td:nth-child(5),
-.bookings-data-table td:nth-child(6) {
-  vertical-align: top;
+.bookings-data-table th:nth-child(7),
+.bookings-data-table th:nth-child(8),
+.bookings-data-table td:nth-child(7),
+.bookings-data-table td:nth-child(8) {
+  text-align: left;
 }
 
 .cell-em {
@@ -455,11 +483,20 @@ td {
 }
 
 .status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border-radius: 999px;
   padding: 5px 10px;
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
+  text-transform: none;
+  text-align: center;
+  min-width: 132px;
+}
+
+.booking-status-stack .cell-muted {
+  text-align: left;
 }
 
 .status-pending {
@@ -473,6 +510,39 @@ td {
 }
 
 .status-cancelled {
+  background: #ffe8e8;
+  color: #b23434;
+}
+
+.status-cancel-request {
+  background: #fff2dd;
+  color: #9a6200;
+}
+
+.btn-sm-danger {
+  background: #d44949;
+  color: #fff;
+  border-color: #d44949;
+}
+
+.action-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 118px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.action-state-success {
+  background: #e1f8ef;
+  color: #0b7a58;
+}
+
+.action-state-danger {
   background: #ffe8e8;
   color: #b23434;
 }
@@ -913,10 +983,11 @@ td {
 }
 
 .slot-control-card {
-  padding: 16px;
-  border-radius: 16px;
-  border-color: #dbe5f2;
-  background: #fff;
+  padding: 16px 18px 14px;
+  border-radius: 18px;
+  border-color: #d7e2ef;
+  background: linear-gradient(180deg, #ffffff 0%, #fbfdff 100%);
+  box-shadow: 0 12px 28px rgba(16, 36, 63, 0.05);
 }
 
 .slot-control-top {
@@ -939,7 +1010,7 @@ td {
 .slot-control-status {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 
@@ -947,76 +1018,187 @@ td {
 .slot-selected-count {
   display: inline-flex;
   align-items: center;
-  min-height: 36px;
-  padding: 0 12px;
+  min-height: 30px;
+  padding: 0 10px;
   border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  border: 1px solid #dbe5f2;
+  font-size: 11.5px;
+  font-weight: 800;
+  border: 0;
 }
 
 .slot-action-pill {
-  background: #f7f9fc;
-  color: #556b87;
+  background: #eff4f9;
+  color: #5f748f;
 }
 
 .slot-action-pill-block {
-  background: #eef6ff;
-  color: #245289;
+  background: #e9f4ff;
+  color: #245587;
 }
 
 .slot-action-pill-unblock {
-  background: #edf8f3;
-  color: #15715f;
+  background: #eaf8f2;
+  color: #176b59;
 }
 
 .slot-action-pill-reserve {
-  background: #fff5e9;
+  background: #fff3e3;
   color: #a36200;
 }
 
 .slot-selected-count {
-  background: #eaf7f2;
-  color: #1d6d58;
-  border-color: #cfe8dc;
+  background: #edf8f3;
+  color: #196b58;
 }
 
 .slot-filter-grid {
-  margin-top: 14px;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns:
+    minmax(240px, 286px)
+    minmax(300px, 392px)
+    minmax(220px, 284px)
+    minmax(220px, 252px);
+  gap: 16px 18px;
+  justify-content: space-between;
+  align-items: end;
 }
 
 .slot-input-card {
   min-width: 0;
-  padding: 12px;
-  border: 1px solid #e2eaf4;
-  border-radius: 12px;
-  background: #fbfdff;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  gap: 8px;
 }
 
 .slot-input-card span {
-  color: #5a718e;
-  font-size: 11px;
-  font-weight: 700;
+  color: #6d8098;
+  font-size: 10.5px;
+  font-weight: 800;
   text-transform: uppercase;
-  letter-spacing: 0.45px;
-}
-
-.slot-input-card small {
-  color: #7a8ea8;
-  font-size: 12px;
-  line-height: 1.45;
+  letter-spacing: 0.8px;
 }
 
 .slot-input-card input,
 .slot-input-card select {
-  margin-top: 2px;
-  border-color: #d6e1ee;
-  border-radius: 10px;
-  min-height: 42px;
+  margin-top: 0;
+  border-color: #d5e0ec;
+  border-radius: 12px;
+  min-height: 46px;
+  padding: 0 14px;
   background: #fff;
+  color: #1e3652;
+  box-shadow: inset 0 1px 2px rgba(10, 23, 45, 0.03);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.slot-input-card input:hover,
+.slot-input-card select:hover {
+  border-color: #bfd1e2;
+}
+
+.slot-input-card input:focus-visible,
+.slot-input-card select:focus-visible {
+  outline: none;
+  border-color: #7ab8d1;
+  box-shadow:
+    0 0 0 4px rgba(122, 184, 209, 0.15),
+    inset 0 1px 2px rgba(10, 23, 45, 0.04);
+}
+
+.slot-input-card select:disabled {
+  color: #8da0b6;
+  background: #f4f7fa;
+  border-color: #e2e9f1;
+  cursor: not-allowed;
+}
+
+.slot-date-display-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 286px;
+}
+
+.slot-date-display-wrap input {
+  margin-top: 0;
+  width: 100%;
+  padding-right: 42px;
+  cursor: pointer;
+}
+
+.slot-input-card-venue select {
+  width: 100%;
+  max-width: 392px;
+}
+
+.slot-input-card-field select {
+  width: 100%;
+  max-width: 284px;
+}
+
+.slot-input-card-action select {
+  width: 100%;
+  max-width: 252px;
+}
+
+.slot-date-display-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: #61768f;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.slot-date-display-btn:hover {
+  background: #eef4fa;
+  color: #34506f;
+}
+
+.slot-date-display-icon {
+  position: relative;
+  width: 14px;
+  height: 12px;
+  border: 1.6px solid currentColor;
+  border-radius: 3px;
+  box-shadow: inset 0 4px 0 0 currentColor;
+}
+
+.slot-date-display-icon::before,
+.slot-date-display-icon::after {
+  content: "";
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 4px;
+  border-radius: 2px;
+  background: currentColor;
+}
+
+.slot-date-display-icon::before {
+  left: 3px;
+}
+
+.slot-date-display-icon::after {
+  right: 3px;
+}
+
+.slot-date-native-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .slot-shortcut-row {
@@ -1046,13 +1228,13 @@ td {
 }
 
 .slot-control-footer {
-  margin-top: 14px;
+  margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid #e5edf7;
+  border-top: 1px solid #e8eef6;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 16px;
 }
 
 .slot-control-actions {
@@ -1068,9 +1250,19 @@ td {
 }
 
 .slot-apply-btn {
-  min-width: 180px;
-  min-height: 42px;
-  border-radius: 10px;
+  min-width: 196px;
+  min-height: 46px;
+  padding: 0 18px;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #24be8c 0%, #11976d 100%);
+  box-shadow: 0 10px 20px rgba(17, 151, 109, 0.18);
+  transition: transform 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease;
+}
+
+.slot-apply-btn:hover:not(:disabled) {
+  filter: brightness(1.03);
+  transform: translateY(-1px);
+  box-shadow: 0 14px 24px rgba(17, 151, 109, 0.22);
 }
 
 .slot-feedback-stack {
@@ -1619,6 +1811,13 @@ td {
 @media (max-width: 860px) {
   .layout-root {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
   }
 
   .search-mini {

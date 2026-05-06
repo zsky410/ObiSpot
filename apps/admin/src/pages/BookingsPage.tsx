@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import {
   ApiRequestError,
   getAdminBookingsApi,
+  patchAdminBookingCancelRequestApi,
   patchAdminBookingStatusApi,
   type AdminBooking
 } from "../lib/api";
@@ -34,6 +35,18 @@ export function BookingsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["admin-bookings"] });
       queryClient.invalidateQueries({ queryKey: ["admin-dashboard"] });
+    }
+  });
+  const cancelRequestMutation = useMutation({
+    mutationFn: async (args: { bookingId: string; decision: "approved" | "rejected" }) => {
+      const token = await getValidAccessToken();
+      if (!token) throw new Error("Phiên đăng nhập đã hết hạn.");
+      return patchAdminBookingCancelRequestApi(token, args.bookingId, args.decision);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["admin-bookings"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["admin-slots"] });
     }
   });
 
@@ -83,8 +96,7 @@ export function BookingsPage() {
                 <th>Khách</th>
                 <th>Sân</th>
                 <th>Chi nhánh</th>
-                <th>Khung giờ</th>
-                <th>Tạo lúc</th>
+                <th>Giờ đặt</th>
                 <th>Giá tiền</th>
                 <th>Trạng thái</th>
                 <th>Hành động</th>
@@ -95,9 +107,15 @@ export function BookingsPage() {
                 <BookingRow
                   key={item.id}
                   item={item}
-                  loading={updateMutation.isPending}
+                  loading={updateMutation.isPending || cancelRequestMutation.isPending}
                   onConfirm={() => updateMutation.mutate({ bookingId: item.id, status: "confirmed" })}
                   onCancel={() => updateMutation.mutate({ bookingId: item.id, status: "cancelled" })}
+                  onApproveCancelRequest={() =>
+                    cancelRequestMutation.mutate({ bookingId: item.id, decision: "approved" })
+                  }
+                  onRejectCancelRequest={() =>
+                    cancelRequestMutation.mutate({ bookingId: item.id, decision: "rejected" })
+                  }
                 />
               ))}
             </tbody>
@@ -112,14 +130,29 @@ function BookingRow({
   item,
   loading,
   onConfirm,
-  onCancel
+  onCancel,
+  onApproveCancelRequest,
+  onRejectCancelRequest
 }: {
   item: AdminBooking;
   loading: boolean;
   onConfirm: () => void;
   onCancel: () => void;
+  onApproveCancelRequest: () => void;
+  onRejectCancelRequest: () => void;
 }) {
-  const canAct = item.status === "pending" && !loading;
+  const cancelRequest = item.cancelRequest ?? { status: null, requestedAt: null, note: null };
+  const hasPendingCancelRequest = cancelRequest.status === "pending";
+  const canAct = item.status === "pending" && !loading && !hasPendingCancelRequest;
+  const canReviewCancelRequest = hasPendingCancelRequest && !loading;
+  const statusBadgeClassName = hasPendingCancelRequest ? "status-cancel-request" : `status-${item.status}`;
+  const statusBadgeLabel = hasPendingCancelRequest
+    ? "Yêu cầu hủy"
+    : item.status === "pending"
+      ? "Chờ xác nhận"
+      : item.status === "confirmed"
+        ? "Đã xác nhận"
+        : "Đã hủy";
   return (
     <tr>
       <td>
@@ -142,55 +175,52 @@ function BookingRow({
       <td>
         <div className="booking-field-cell">
           <span className="cell-text">{item.venueName || "—"}</span>
-          <span className="cell-muted">
-            {item.venueAddress || (item.venueId ? `ID: ${item.venueId.slice(0, 8)}` : "—")}
-          </span>
         </div>
       </td>
       <td>
-        {(() => {
-          const slotDisplay = formatSlotTime(item.slotStartTime, item.slotEndTime);
-          return (
-            <div className="booking-time-cell">
-              <span className="cell-time">{slotDisplay.timeRange}</span>
-              <span className="cell-muted">{slotDisplay.date}</span>
-            </div>
-          );
-        })()}
-      </td>
-      <td>
-        {(() => {
-          const createdDisplay = formatCreatedAt(item.createdAt);
-          return (
-            <div className="booking-time-cell">
-              <span className="cell-time">{createdDisplay.time}</span>
-              <span className="cell-muted">{createdDisplay.date}</span>
-            </div>
-          );
-        })()}
+        <span className="cell-time">{formatBookingTime(item.slotStartTime, item.slotEndTime)}</span>
       </td>
       <td>
         <span className="cell-price">{formatVnd(item.totalPrice ?? 0)}</span>
       </td>
       <td>
-        <span className={`status-badge status-${item.status}`}>{item.status}</span>
+        <div className="booking-status-stack">
+          <span className={`status-badge ${statusBadgeClassName}`}>{statusBadgeLabel}</span>
+        </div>
       </td>
       <td>
         <div className="table-actions">
-          <button className="btn-sm" onClick={onConfirm} disabled={!canAct}>
-            Confirm
-          </button>
-          <button className="btn-sm btn-sm-muted" onClick={onCancel} disabled={!canAct}>
-            Cancel
-          </button>
+          {hasPendingCancelRequest ? (
+            <>
+              <button className="btn-sm btn-sm-danger" onClick={onApproveCancelRequest} disabled={!canReviewCancelRequest}>
+                Duyệt hủy
+              </button>
+              <button className="btn-sm btn-sm-muted" onClick={onRejectCancelRequest} disabled={!canReviewCancelRequest}>
+                Từ chối
+              </button>
+            </>
+          ) : item.status === "pending" ? (
+            <>
+              <button className="btn-sm" onClick={onConfirm} disabled={!canAct}>
+                Xác nhận
+              </button>
+              <button className="btn-sm btn-sm-muted" onClick={onCancel} disabled={!canAct}>
+                Hủy đơn
+              </button>
+            </>
+          ) : item.status === "confirmed" ? (
+            <span className="action-state action-state-success">Đã xác nhận</span>
+          ) : (
+            <span className="action-state action-state-danger">Đơn đã hủy</span>
+          )}
         </div>
       </td>
     </tr>
   );
 }
 
-function formatSlotTime(start: string | null, end: string | null) {
-  if (!start || !end) return { timeRange: "—", date: "—" };
+function formatBookingTime(start: string | null, end: string | null) {
+  if (!start || !end) return "—";
   const s = new Date(start);
   const e = new Date(end);
   const timeRange = `${s.toLocaleTimeString("vi-VN", {
@@ -208,24 +238,7 @@ function formatSlotTime(start: string | null, end: string | null) {
     month: "2-digit",
     year: "numeric"
   });
-  return { timeRange, date };
-}
-
-function formatCreatedAt(iso: string) {
-  if (!iso) return { time: "—", date: "—" };
-  const d = new Date(iso);
-  const time = d.toLocaleTimeString("vi-VN", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-  const date = d.toLocaleDateString("vi-VN", {
-    timeZone: "Asia/Ho_Chi_Minh",
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  });
-  return { time, date };
+  return `${timeRange} · ${date}`;
 }
 
 function formatVnd(value: number) {
