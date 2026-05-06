@@ -5,7 +5,7 @@ import { supabaseAdminClient } from "../lib/supabase.js";
 import { requireAuth } from "../middleware/auth.js";
 import { ERROR_CODES } from "../utils/errorCodes.js";
 import { asyncHandler, sendError } from "../utils/http.js";
-import { hasValidationError, uuidLikeSchema, validateBody } from "../utils/validate.js";
+import { hasValidationError, uuidLikeSchema, validateBody, validateParams } from "../utils/validate.js";
 
 export const bookingsRouter = Router();
 
@@ -23,9 +23,45 @@ const createBookingBodySchema = z
       path: ["slotId"]
     }
   );
+const bookingParamsSchema = z.object({
+  bookingId: uuidLikeSchema
+});
+const cancelRequestBodySchema = z.object({
+  note: z.string().trim().max(300).optional().nullable()
+});
 
 function slotInstantMs(iso) {
   return new Date(iso).getTime();
+}
+
+function aggregateCancelRequest(rows) {
+  const requestedRows = rows.filter((row) => row.cancel_request_status);
+  if (requestedRows.length === 0) {
+    return {
+      status: null,
+      requestedAt: null,
+      note: null
+    };
+  }
+
+  const status = requestedRows.some((row) => row.cancel_request_status === "pending")
+    ? "pending"
+    : requestedRows.some((row) => row.cancel_request_status === "approved")
+      ? "approved"
+      : "rejected";
+
+  let requestedAt = null;
+  for (const row of requestedRows) {
+    if (row.cancel_requested_at && (!requestedAt || new Date(row.cancel_requested_at).getTime() > new Date(requestedAt).getTime())) {
+      requestedAt = row.cancel_requested_at;
+    }
+  }
+
+  return {
+    status,
+    requestedAt,
+    note: requestedRows.find((row) => row.cancel_request_note)?.cancel_request_note || null
+  };
 }
 
 bookingsRouter.post(
@@ -167,7 +203,7 @@ bookingsRouter.get(
   asyncHandler(async (req, res) => {
     const { data: bookingRows, error: bookingError } = await supabaseAdminClient
       .from("bookings")
-      .select("id, order_id, status, created_at, note, slot_id")
+      .select("id, order_id, status, created_at, note, slot_id, cancel_requested_at, cancel_request_note, cancel_request_status")
       .eq("user_id", req.auth.user.id)
       .order("created_at", { ascending: false });
 
@@ -240,6 +276,11 @@ bookingsRouter.get(
           status: booking.status,
           createdAt: booking.created_at || null,
           note: booking.note ?? null,
+          cancelRequest: {
+            status: booking.cancel_request_status || null,
+            requestedAt: booking.cancel_requested_at || null,
+            note: booking.cancel_request_note ?? null
+          },
           slot: {
             id: ts?.id || null,
             startTime: ts?.start_time || null,
@@ -277,6 +318,28 @@ bookingsRouter.get(
       if (!existing.note && booking.note) {
         existing.note = booking.note;
       }
+      if (booking.cancel_request_status === "pending") {
+        existing.cancelRequest.status = "pending";
+      } else if (booking.cancel_request_status === "approved" && existing.cancelRequest.status !== "pending") {
+        existing.cancelRequest.status = "approved";
+      } else if (
+        booking.cancel_request_status === "rejected" &&
+        !existing.cancelRequest.status
+      ) {
+        existing.cancelRequest.status = "rejected";
+      }
+      if (booking.cancel_requested_at) {
+        const currentRequestedAt = existing.cancelRequest.requestedAt
+          ? new Date(existing.cancelRequest.requestedAt).getTime()
+          : Number.NEGATIVE_INFINITY;
+        const nextRequestedAt = new Date(booking.cancel_requested_at).getTime();
+        if (nextRequestedAt > currentRequestedAt) {
+          existing.cancelRequest.requestedAt = booking.cancel_requested_at;
+        }
+      }
+      if (!existing.cancelRequest.note && booking.cancel_request_note) {
+        existing.cancelRequest.note = booking.cancel_request_note;
+      }
       if (booking.status === "pending" || existing.status === "pending") {
         existing.status = "pending";
       } else if (booking.status === "confirmed" || existing.status === "confirmed") {
@@ -293,5 +356,89 @@ bookingsRouter.get(
     });
 
     return res.status(200).json({ items });
+  })
+);
+
+bookingsRouter.post(
+  "/:bookingId/cancel-request",
+  requireAuth,
+  validateParams(bookingParamsSchema),
+  validateBody(cancelRequestBodySchema),
+  asyncHandler(async (req, res) => {
+    if (hasValidationError(req)) {
+      return sendError(
+        res,
+        400,
+        ERROR_CODES.validationError,
+        "Invalid cancel request payload",
+        { fields: req.validationError }
+      );
+    }
+
+    const { bookingId } = req.validatedParams;
+    const { note } = req.validatedBody;
+    const { data: matchedRows, error: matchedError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, order_id, status, user_id, cancel_requested_at, cancel_request_note, cancel_request_status")
+      .eq("user_id", req.auth.user.id)
+      .or(`id.eq.${bookingId},order_id.eq.${bookingId}`)
+      .limit(1);
+
+    const matched = matchedRows?.[0];
+    if (matchedError || !matched) {
+      return sendError(res, 404, ERROR_CODES.bookingNotFound, "Booking not found");
+    }
+
+    const orderId = matched.order_id || matched.id;
+    const orderFilter = matched.order_id ? { column: "order_id", value: matched.order_id } : { column: "id", value: matched.id };
+    const { data: orderRows, error: orderError } = await supabaseAdminClient
+      .from("bookings")
+      .select("id, status, cancel_requested_at, cancel_request_note, cancel_request_status")
+      .eq("user_id", req.auth.user.id)
+      .eq(orderFilter.column, orderFilter.value);
+
+    if (orderError || !orderRows || orderRows.length === 0) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to resolve booking order");
+    }
+
+    if (orderRows.some((row) => row.status === "cancelled")) {
+      return sendError(
+        res,
+        409,
+        ERROR_CODES.invalidStatusTransition,
+        "Đơn đã hủy nên không thể gửi yêu cầu hủy thêm"
+      );
+    }
+
+    const currentCancelRequest = aggregateCancelRequest(orderRows);
+    if (currentCancelRequest.status === "pending") {
+      return res.status(200).json({
+        id: orderId,
+        updatedCount: 0,
+        cancelRequest: currentCancelRequest
+      });
+    }
+
+    const cancelRequestedAt = new Date().toISOString();
+    const { data: updatedRows, error: updateError } = await supabaseAdminClient
+      .from("bookings")
+      .update({
+        cancel_requested_at: cancelRequestedAt,
+        cancel_request_note: note || null,
+        cancel_request_status: "pending"
+      })
+      .eq("user_id", req.auth.user.id)
+      .eq(orderFilter.column, orderFilter.value)
+      .select("id, cancel_requested_at, cancel_request_note, cancel_request_status");
+
+    if (updateError) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to create cancel request");
+    }
+
+    return res.status(200).json({
+      id: orderId,
+      updatedCount: (updatedRows || []).length,
+      cancelRequest: aggregateCancelRequest(updatedRows || [])
+    });
   })
 );

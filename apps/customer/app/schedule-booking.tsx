@@ -142,6 +142,23 @@ export default function ScheduleBookingScreen() {
     return keys;
   }, [slotItems, selectedDate, timelineTimes]);
 
+  const selectedCellKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const slot of selectedSorted) {
+      const startLabel = slotGridRowKey(slot.startTime, selectedDate);
+      const endLabel = slotGridRowKey(slot.endTime, selectedDate);
+      const startIdx = startLabel ? timelineTimes.indexOf(startLabel) : -1;
+      const endIdx = endLabel ? timelineTimes.indexOf(endLabel) : -1;
+      if (startIdx === -1 || endIdx === -1) {
+        continue;
+      }
+      for (let i = startIdx; i < endIdx; i += 1) {
+        keys.add(`${slot.fieldName}__${timelineTimes[i]}`);
+      }
+    }
+    return keys;
+  }, [selectedSorted, selectedDate, timelineTimes]);
+
   const activeBoundaryKeys = useMemo(() => {
     const keys = new Set<string>();
     if (!selection) {
@@ -262,7 +279,8 @@ export default function ScheduleBookingScreen() {
                     </View>
                     {fieldRows.map((fieldName) => {
                       const cellKey = `${fieldName}__${time}`;
-                      const active = activeBoundaryKeys.has(cellKey);
+                      const active = selectedCellKeys.has(cellKey);
+                      const isBoundaryOnly = !active && activeBoundaryKeys.has(cellKey);
                       const overlapsBookedSlice = timelineSliceOverlapsBusy(
                         fieldName,
                         time,
@@ -276,7 +294,8 @@ export default function ScheduleBookingScreen() {
                           style={[
                             styles.tableSlotCell,
                             isAvailable ? styles.tableSlotCellAvailable : styles.tableSlotCellBooked,
-                            active && styles.tableSlotCellActive
+                            active && styles.tableSlotCellActive,
+                            isBoundaryOnly && styles.tableSlotCellBoundaryHint
                           ]}
                           onPress={() => {
                             if (isAvailable) {
@@ -639,6 +658,11 @@ const styles = StyleSheet.create({
   },
   tableSlotCellActive: {
     backgroundColor: "#42B883"
+  },
+  tableSlotCellBoundaryHint: {
+    backgroundColor: "#DDF5EC",
+    borderWidth: 1,
+    borderColor: "#42B883"
   },
   venueInfoCard: {
     borderWidth: 1,

@@ -118,7 +118,10 @@ function BookingItem({ item }: { item: MyBooking }) {
     confirmed: { label: "Đã xác nhận", color: "#087B57", bg: "#DDF9EE" },
     cancelled: { label: "Đã hủy", color: "#BA1A1A", bg: "#FFE8E8" }
   };
-  const status = statusMap[item.status];
+  const cancelRequestPending = item.cancelRequest.status === "pending";
+  const status = cancelRequestPending
+    ? { label: "Đang chờ duyệt hủy", color: "#B86800", bg: "#FFF1DA" }
+    : statusMap[item.status];
   const fieldTitle = item.slot.fieldName?.trim() || "—";
   const venueLine = [item.venue.name?.trim(), item.venue.address?.trim()].filter(Boolean).join(" · ");
   const thumbKey = item.venue.id || item.id;
@@ -141,6 +144,11 @@ function BookingItem({ item }: { item: MyBooking }) {
           {notePreview ? (
             <Text style={styles.noteText} numberOfLines={2}>
               Ghi chú: {notePreview}
+            </Text>
+          ) : null}
+          {cancelRequestPending && item.cancelRequest.requestedAt ? (
+            <Text style={styles.cancelPendingText}>
+              Đã gửi yêu cầu hủy lúc {formatCreatedAt(item.cancelRequest.requestedAt)}
             </Text>
           ) : null}
         </View>
@@ -244,6 +252,7 @@ const styles = StyleSheet.create({
   cardTitle: { fontSize: 20, fontWeight: "800", color: "#0B1C30", flex: 1 },
   metaText: { color: "#5B6574" },
   noteText: { color: "#4A5A6E", fontSize: 12, marginTop: 4, fontStyle: "italic" },
+  cancelPendingText: { color: "#A55F00", fontSize: 12, marginTop: 4, fontWeight: "700" },
   cardFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-end" },
   timeText: { color: "#21364E", fontWeight: "800", marginTop: 3 },
   createdText: { color: "#8A98A9", fontSize: 11, marginTop: 4 },
