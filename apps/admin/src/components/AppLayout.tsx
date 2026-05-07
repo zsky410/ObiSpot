@@ -35,13 +35,13 @@ export function AppLayout() {
           <NavLink className="nav-item" to="/slots">
             Quản lý khung giờ
           </NavLink>
-          <a className="nav-item nav-item-muted" href="#">
-            FAQ Chatbot
-          </a>
         </nav>
         <div className="sidebar-foot">
           <button className="btn btn-outline sidebar-logout" onClick={logout}>
-            Cài đặt / Đăng xuất
+            <span className="sidebar-logout-icon" aria-hidden="true">
+              ↗
+            </span>
+            Đăng xuất
           </button>
         </div>
       </aside>

@@ -16,11 +16,10 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { TabHeaderLogo } from "../../src/components/TabHeaderLogo";
 import {
   ApiRequestError,
-  getChatbotSessionApi,
   queryChatbotApi,
+  resetChatbotSessionApi,
   type ChatbotHistoryItem,
-  type ChatbotReply,
-  type ChatbotSessionMessage
+  type ChatbotReply
 } from "../../src/lib/api";
 import { useAuth } from "../../src/store/auth";
 
@@ -36,15 +35,6 @@ function buildMessageId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function mapSessionMessage(item: ChatbotSessionMessage): ChatMessage {
-  return {
-    id: item.id,
-    role: item.role,
-    text: item.text,
-    source: item.source
-  };
-}
-
 export default function ChatScreen() {
   const { bootstrapped, getValidAccessToken } = useAuth();
   const insets = useSafeAreaInsets();
@@ -53,8 +43,8 @@ export default function ChatScreen() {
   const [inputValue, setInputValue] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [isHydratingSession, setIsHydratingSession] = useState(false);
-  const [hasHydratedSession, setHasHydratedSession] = useState(false);
+  const [isPreparingSession, setIsPreparingSession] = useState(false);
+  const [hasPreparedSession, setHasPreparedSession] = useState(false);
 
   function scrollToLatest(animated = true) {
     requestAnimationFrame(() => {
@@ -82,46 +72,42 @@ export default function ChatScreen() {
   useEffect(() => {
     let alive = true;
 
-    async function hydrateSession() {
-      if (!bootstrapped || hasHydratedSession) {
+    async function prepareFreshSession() {
+      if (!bootstrapped || hasPreparedSession) {
         return;
       }
 
-      setIsHydratingSession(true);
+      setIsPreparingSession(true);
       try {
         const token = await getValidAccessToken();
         if (!token || !alive) {
           return;
         }
 
-        const response = await getChatbotSessionApi(token);
-        if (!alive) {
-          return;
-        }
-
-        setSessionId(response.sessionId || null);
-        setMessages((response.items || []).map(mapSessionMessage));
+        setSessionId(null);
+        setMessages([]);
+        await resetChatbotSessionApi(token);
       } catch (error) {
-        console.error("Failed to hydrate chatbot session:", error);
+        console.error("Failed to reset chatbot session:", error);
       } finally {
         if (alive) {
-          setIsHydratingSession(false);
-          setHasHydratedSession(true);
+          setIsPreparingSession(false);
+          setHasPreparedSession(true);
           scrollToLatest(false);
         }
       }
     }
 
-    void hydrateSession();
+    void prepareFreshSession();
 
     return () => {
       alive = false;
     };
-  }, [bootstrapped, getValidAccessToken, hasHydratedSession]);
+  }, [bootstrapped, getValidAccessToken, hasPreparedSession]);
 
   async function sendMessage() {
     const nextMessage = inputValue.trim();
-    if (!nextMessage || isSending || isHydratingSession) {
+    if (!nextMessage || isSending || isPreparingSession) {
       return;
     }
 
@@ -140,7 +126,7 @@ export default function ChatScreen() {
     setMessages((current) => [
       ...current,
       { id: userMessageId, role: "user", text: nextMessage },
-      { id: pendingMessageId, role: "assistant", text: "Đang kiểm tra lịch sân cho bạn...", pending: true }
+      { id: pendingMessageId, role: "assistant", text: "ObiSpot AI đang trả lời...", pending: true }
     ]);
 
     try {
@@ -241,10 +227,10 @@ export default function ChatScreen() {
               );
             }}
             ListEmptyComponent={
-              isHydratingSession ? (
+              isPreparingSession ? (
                 <View style={styles.emptyState}>
                   <ActivityIndicator size="small" color="#136F63" />
-                  <Text style={styles.emptyText}>Đang tải phiên trò chuyện gần nhất...</Text>
+                  <Text style={styles.emptyText}>Đang tạo cuộc trò chuyện mới...</Text>
                 </View>
               ) : (
                 <View style={styles.emptyState}>
@@ -272,15 +258,15 @@ export default function ChatScreen() {
                 value={inputValue}
                 onChangeText={setInputValue}
                 multiline
-                editable={!isSending && bootstrapped && !isHydratingSession}
+                editable={!isSending && bootstrapped && !isPreparingSession}
               />
               <Pressable
                 style={[
                   styles.sendButton,
-                  (!inputValue.trim() || isSending || !bootstrapped || isHydratingSession) && styles.sendButtonDisabled
+                  (!inputValue.trim() || isSending || !bootstrapped || isPreparingSession) && styles.sendButtonDisabled
                 ]}
                 onPress={() => void sendMessage()}
-                disabled={!inputValue.trim() || isSending || !bootstrapped || isHydratingSession}
+                disabled={!inputValue.trim() || isSending || !bootstrapped || isPreparingSession}
               >
                 <Ionicons name="paper-plane" size={18} color="#FFFFFF" />
               </Pressable>

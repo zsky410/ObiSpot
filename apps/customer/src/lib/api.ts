@@ -191,7 +191,7 @@ export type MyBooking = {
 export type ChatbotReply = {
   sessionId?: string | null;
   reply: string;
-  source: "db+llm" | "fallback";
+  source: "db+llm" | "fallback" | "rule";
   suggestions?: string[];
   state?: Record<string, unknown>;
 };
@@ -205,7 +205,7 @@ export type ChatbotSessionMessage = {
   id: string;
   role: "assistant" | "user";
   text: string;
-  source?: "db+llm" | "fallback";
+  source?: "db+llm" | "fallback" | "rule";
   createdAt?: string | null;
 };
 
@@ -359,6 +359,13 @@ export async function getChatbotSessionApi(token: string) {
     items: ChatbotSessionMessage[];
     state?: Record<string, unknown>;
   }>("/chatbot/session", {
+    token
+  });
+}
+
+export async function resetChatbotSessionApi(token: string) {
+  return apiRequest<{ ok: boolean }>("/chatbot/session/reset", {
+    method: "POST",
     token
   });
 }

@@ -357,17 +357,49 @@ function hasTimeReference(normalizedMessage) {
 
 function hasFollowUpSignal(normalizedMessage) {
   return Boolean(
-    /\b(thi sao|sao nhi|sao ta|sao a|con sao|con khong|the nao|chi nhanh do|san do)\b/.test(normalizedMessage) ||
-      normalizedMessage.split(" ").filter(Boolean).length <= 6
+    /\b(thi sao|sao nhi|sao ta|sao a|con sao|con khong|the nao|chi nhanh do|san do|chi nhanh nay|san nay|chi nhanh ay|san ay)\b/.test(
+      normalizedMessage
+    )
   );
 }
 
 function isNonTaskMessage(normalizedMessage) {
-  return /\b(cam on|thank|thanks|ok|oke|tam biet|bye)\b/.test(normalizedMessage);
+  return Boolean(buildNonTaskReply(normalizedMessage));
 }
 
 function hasImplicitFieldReference(normalizedMessage) {
   return /\b(san do|san nay|san ay|san kia)\b/.test(normalizedMessage);
+}
+
+function buildNonTaskReply(normalizedMessage) {
+  if (
+    parseTopic(normalizedMessage) !== "general" ||
+    hasTimeReference(normalizedMessage) ||
+    /\b(ngay|hom nay|mai|ngay kia|chi nhanh|san)\b/.test(normalizedMessage)
+  ) {
+    return null;
+  }
+
+  if (
+    /^(hi|hello|hey|alo|xin chao|chao|chao ban|helo)\b/.test(normalizedMessage) ||
+    /^(hi|hello|hey|alo)$/.test(normalizedMessage)
+  ) {
+    return "Chào bạn. Nếu cần kiểm tra lịch sân, bạn cứ nhắn chi nhánh, ngày và khung giờ nhé.";
+  }
+
+  if (/\b(ban khoe kh|ban khoe khong|ban khoe ko|khoe khong|khoe ko|khoe chu|ban the nao)\b/.test(normalizedMessage)) {
+    return "Mình ổn nhé. Nếu bạn muốn kiểm tra lịch sân, cứ gửi chi nhánh, ngày và khung giờ mình xem giúp bạn.";
+  }
+
+  if (/\b(cam on|thank|thanks)\b/.test(normalizedMessage)) {
+    return "Không có gì. Khi nào cần kiểm tra lịch sân hoặc giá sân, bạn cứ nhắn mình nhé.";
+  }
+
+  if (/\b(tam biet|bye|bye bye|hen gap lai)\b/.test(normalizedMessage)) {
+    return "Chào bạn nhé. Khi cần kiểm tra lịch sân, cứ quay lại nhắn mình.";
+  }
+
+  return null;
 }
 
 function parseChatIntent(message) {
@@ -557,6 +589,8 @@ function buildIntentFromConversation(message, sessionState, history, venues, fie
     !isNonTaskMessage(currentIntent.normalizedMessage) &&
     (
       hasFollowUpSignal(currentIntent.normalizedMessage) ||
+      currentIntent.dateSource !== "defaultToday" ||
+      hasTimeReference(currentIntent.normalizedMessage) ||
       currentMatch.matchedVenues.length > 0 ||
       currentMatch.matchedFields.length > 0 ||
       Boolean(currentIntent.pitchFormat)
@@ -1599,6 +1633,21 @@ chatbotRouter.get(
 );
 
 chatbotRouter.post(
+  "/session/reset",
+  requireAuth,
+  asyncHandler(async (req, res) => {
+    const { error } = await supabaseAdminClient.from("chat_logs").delete().eq("user_id", req.auth.user.id);
+    if (error) {
+      return sendError(res, 500, ERROR_CODES.dbError, "Failed to reset chat session");
+    }
+
+    return res.status(200).json({
+      ok: true
+    });
+  })
+);
+
+chatbotRouter.post(
   "/query",
   requireAuth,
   validateBody(chatbotQueryBodySchema),
@@ -1611,7 +1660,9 @@ chatbotRouter.post(
 
     const { message, history = [], sessionId: requestedSessionId } = req.validatedBody;
     const intent = parseChatIntent(message);
-    const sessionData = await resolveChatSession(req.auth.user.id, requestedSessionId);
+    const sessionData = requestedSessionId
+      ? await loadChatSessionRows(req.auth.user.id, requestedSessionId)
+      : { sessionId: randomUUID(), rows: [], state: null, error: null };
     if (sessionData.error) {
       return sendError(res, 500, ERROR_CODES.dbError, "Failed to load chat session");
     }
@@ -1619,28 +1670,34 @@ chatbotRouter.post(
     const sessionId = sessionData.sessionId || requestedSessionId || randomUUID();
     const effectiveHistory = sessionData.rows.length > 0 ? buildHistoryFromSessionRows(sessionData.rows) : history;
     const sessionState = normalizeSessionState(sessionData.state);
+    const nonTaskReply = buildNonTaskReply(intent.normalizedMessage);
     let reply = CHAT_FALLBACK_REPLY;
     let source = "fallback";
     let suggestions = buildSuggestions(intent, []);
     let nextSessionState = sessionState;
 
     try {
-      const chatbotContext = await fetchChatbotContext(message, {
-        history: effectiveHistory,
-        sessionState
-      });
-      suggestions = buildSuggestions(chatbotContext.intent, chatbotContext.availability.byVenue);
-      const structuredReply = buildStructuredReply(chatbotContext);
-      if (structuredReply) {
-        reply = structuredReply;
+      if (nonTaskReply) {
+        reply = nonTaskReply;
+        source = "rule";
       } else {
-        reply = await generateAnswer(buildPrompt(message, effectiveHistory, chatbotContext), {
-          timeoutMs: CHAT_TIMEOUT_MS
+        const chatbotContext = await fetchChatbotContext(message, {
+          history: effectiveHistory,
+          sessionState
         });
+        suggestions = buildSuggestions(chatbotContext.intent, chatbotContext.availability.byVenue);
+        const structuredReply = buildStructuredReply(chatbotContext);
+        if (structuredReply) {
+          reply = structuredReply;
+        } else {
+          reply = await generateAnswer(buildPrompt(message, effectiveHistory, chatbotContext), {
+            timeoutMs: CHAT_TIMEOUT_MS
+          });
+        }
+        nextSessionState = buildSessionState(chatbotContext, sessionState);
+        source = "db+llm";
       }
       reply = normalizeAssistantReply(reply);
-      nextSessionState = buildSessionState(chatbotContext, sessionState);
-      source = "db+llm";
     } catch (error) {
       reply = buildFallbackReply(error);
       console.error("Chatbot failed, using fallback:", error instanceof Error ? error.message : error);
